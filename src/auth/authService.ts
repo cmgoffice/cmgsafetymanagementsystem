@@ -6,7 +6,7 @@ import {
   GoogleAuthProvider,
   User as FirebaseUser,
 } from "firebase/auth";
-import { doc, getDoc, setDoc, runTransaction, serverTimestamp, Timestamp } from "firebase/firestore";
+import { doc, getDoc, setDoc, runTransaction, serverTimestamp, Timestamp, onSnapshot } from "firebase/firestore";
 import { auth, db } from "../firebase";
 import { APP_NAME } from "./constants";
 import type { UserRole } from "./constants";
@@ -75,7 +75,7 @@ async function createUserProfile(
       firstName: options.firstName,
       lastName: options.lastName,
       position: options.position,
-      roles: isFirst ? (["SuperAdmin"] as UserRole[]) : options.roles,
+      roles: isFirst ? (["MasterAdmin", "SuperAdmin"] as UserRole[]) : options.roles,
       status: isFirst ? "approved" : options.status,
       assignedProjects: [],
       photoURL,
@@ -159,6 +159,29 @@ export async function fetchProfile(uid: string): Promise<UserProfile | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Real-time subscription to user profile. เมื่อแอดมินอัปเดตสิทธิ์ จะได้ profile ใหม่ทันที
+ */
+export function subscribeToProfile(uid: string, onProfile: (profile: UserProfile | null) => void): () => void {
+  if (!db) return () => {};
+  const ref = userDoc(uid);
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (!snap.exists()) {
+        onProfile(null);
+        return;
+      }
+      try {
+        onProfile(toUserProfile(uid, snap.data()!));
+      } catch {
+        onProfile(null);
+      }
+    },
+    () => onProfile(null)
+  );
 }
 
 export function logout(): Promise<void> {

@@ -9,9 +9,10 @@ export const SESSION_DURATION_MS = 60 * 60 * 1000;
 
 /**
  * Roles: 1 user can have multiple roles.
- * SuperAdmin, Admin for admin panel; rest from existing CMG Safety system.
+ * MasterAdmin, SuperAdmin, Admin = เข้าหน้าจัดการ User ได้
  */
 export const USER_ROLES = [
+  "MasterAdmin",
   "SuperAdmin",
   "Admin",
   "staff",
@@ -24,6 +25,7 @@ export const USER_ROLES = [
 export type UserRole = (typeof USER_ROLES)[number];
 
 export const USER_ROLE_LABELS: Record<UserRole, string> = {
+  MasterAdmin: "Master Admin",
   SuperAdmin: "Super Admin",
   Admin: "Admin",
   staff: "Safety Staff",

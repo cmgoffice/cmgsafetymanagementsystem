@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "../firebase";
-import { fetchProfile, logout as authLogout } from "./authService";
+import { fetchProfile, subscribeToProfile, logout as authLogout } from "./authService";
 import { getRemainingMinutes, isSessionExpired, clearSession } from "./session";
 import type { FirebaseUser, UserProfile } from "./types";
 
@@ -53,23 +53,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLoading(false);
       return;
     }
-    const unsub = onAuthStateChanged(auth, async (user) => {
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
       setFirebaseUser(user);
       if (!user) {
         setUserProfile(null);
         setLoading(false);
         return;
       }
-      try {
-        const profile = await fetchProfile(user.uid);
-        setUserProfile(profile);
-      } catch {
-        setUserProfile(null);
-      }
+      setLoading(true);
+    });
+    return () => unsubAuth();
+  }, []);
+
+  // Real-time profile: เมื่อแอดมินอัปเดต roles/status/assignedProjects จะอัปเดตทันทีโดยไม่ต้อง refresh
+  useEffect(() => {
+    if (!firebaseUser?.uid) return;
+    const unsub = subscribeToProfile(firebaseUser.uid, (profile) => {
+      setUserProfile(profile);
       setLoading(false);
     });
     return () => unsub();
-  }, []);
+  }, [firebaseUser?.uid]);
 
   // Session expiry check every 60s; do NOT force-logout inside onAuthStateChanged
   useEffect(() => {

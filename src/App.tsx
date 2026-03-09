@@ -3,8 +3,11 @@ import { Link, useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { useFirestoreCollection } from "./useFirestore";
 import { seedToFirebase } from "./seedFirebase";
-import { db } from "./firebase";
+import { collection, doc, getDocs } from "firebase/firestore";
+import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
+import { db, storage } from "./firebase";
 import { useAuth } from "./auth/AuthContext";
+import { APP_NAME } from "./auth/constants";
 import {
   ClipboardList,
   CheckCircle,
@@ -27,6 +30,9 @@ import {
   Upload,
   FileDown,
   ClipboardCheck,
+  Settings,
+  Columns,
+  ChevronDown,
 } from "lucide-react";
 
 // --- TYPES ---
@@ -35,9 +41,14 @@ type ChecklistStatus = "pass" | "warn" | "fail";
 type ChecklistMap = { [key: number]: ChecklistStatus };
 type HistoryEntry = { role: string; action: string; time: string };
 
+/** รูปภาพอัปโหลดต่อรายการ 2.4 (ไม่บังคับ สูงสุด 5 รูปต่อรายการ) */
+type ChecklistImagesMap = { [itemId: number]: string[] };
+
 type Report = {
   id: number;
   project: string;
+  /** เลขที่เอกสาร รูปแบบ รหัสโครงการ-DailyReport-XXX เช่น J-74-DailyReport-001 */
+  docNo?: string;
   date: string;
   staffName: string;
   toolboxTopic: string;
@@ -45,6 +56,8 @@ type Report = {
   training: string;
   accident: string;
   checklist: ChecklistMap;
+  /** รูปภาพแนบต่อรายการการตรวจความปลอดภัยประจำวัน */
+  checklistImages?: ChecklistImagesMap;
   status: string;
   history: HistoryEntry[];
   acknowledgedByExecs: string[];
@@ -168,6 +181,9 @@ const ROLES = {
   EXEC: { id: "exec", label: "PM/PD/GM/MD", level: 5 },
 };
 
+const WORKFLOW_ROLE_IDS = ["staff", "site_mgr", "cm", "cmg_mgr", "exec"] as const;
+const ROLE_LIST = Object.values(ROLES);
+
 const CHECKLIST_ITEMS = [
   { id: 1, category: "PPE", text: "การสวมใส่อุปกรณ์ป้องกันภัยส่วนบุคคล (หมวก, รองเท้า, เสื้อ)" },
   { id: 2, category: "Working at Height", text: "ความปลอดภัยการทำงานบนที่สูง (นั่งร้าน, ราวกันตก)" },
@@ -227,10 +243,35 @@ const INITIAL_PROJECTS: Project[] = [
   },
 ];
 
+/** คืนค่าเลขที่เอกสารสำหรับแสดง (รองรับรายงานเก่าที่ไม่มี docNo) */
+function getReportDocNo(report: Report): string {
+  if (report.docNo) return report.docNo;
+  const prefix = `${report.project}-DailyReport-`;
+  const num = String(report.id).slice(-3).padStart(3, "0");
+  return `${prefix}${num}`;
+}
+
+/** คืนค่า Doc No. ถัดไปของโครงการ เช่น J-74-DailyReport-001 */
+function getNextDailyReportDocNo(projectCode: string, existingReports: Report[]): string {
+  const prefix = `${projectCode}-DailyReport-`;
+  const sameProject = existingReports.filter((r) => r.project === projectCode);
+  let maxNum = 0;
+  for (const r of sameProject) {
+    if (r.docNo && r.docNo.startsWith(prefix)) {
+      const numStr = r.docNo.slice(prefix.length);
+      const n = parseInt(numStr, 10);
+      if (!Number.isNaN(n) && n > maxNum) maxNum = n;
+    }
+  }
+  const next = maxNum + 1;
+  return `${prefix}${String(next).padStart(3, "0")}`;
+}
+
 const INITIAL_REPORTS: Report[] = [
   {
     id: 101,
     project: "J-01",
+    docNo: "J-01-DailyReport-001",
     date: "2023-10-25",
     staffName: "สมชาย ใจดี",
     toolboxTopic: "การทำงานในที่อับอากาศ",
@@ -305,19 +346,24 @@ export default function App() {
   const { userProfile, logout, sessionMinutesLeft } = useAuth();
   const navigate = useNavigate();
 
-  const initialUser = useMemo((): User => {
+  // บทบาทที่ฝังใน User (จากแอดมิน) — มีสิทธิ์บทบาทใดก็ใช้ได้เลย ไม่ต้องเลือกสลับ
+  const workflowRoles = useMemo((): typeof WORKFLOW_ROLE_IDS[number][] => {
+    const list = userProfile?.roles?.filter((r) => WORKFLOW_ROLE_IDS.includes(r as typeof WORKFLOW_ROLE_IDS[number])) ?? [];
+    return Array.from(new Set(list)) as typeof WORKFLOW_ROLE_IDS[number][];
+  }, [userProfile?.roles]);
+
+  const hasWorkflowRole = (roleId: string) => workflowRoles.includes(roleId as typeof WORKFLOW_ROLE_IDS[number]);
+
+  const currentUser = useMemo((): User => {
     if (!userProfile) return { role: ROLES.STAFF, project: "J-01", name: "User" };
-    const roleId = userProfile.roles?.find((r) => Object.values(ROLES).some((ro) => ro.id === r)) ?? "staff";
-    const role = Object.values(ROLES).find((ro) => ro.id === roleId) ?? ROLES.STAFF;
+    const role = ROLE_LIST.find((ro) => ro.id === workflowRoles[0]) ?? ROLES.STAFF;
     const project = userProfile.assignedProjects?.[0] ?? "J-01";
     const name = `${userProfile.firstName} ${userProfile.lastName}`.trim() || userProfile.email;
     return { role, project, name };
-  }, [userProfile]);
-
-  const [currentUser, setCurrentUser] = useState<User>(initialUser);
+  }, [userProfile, workflowRoles]);
 
   // Sidebar
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeSection, setActiveSection] = useState<SidebarSection>("daily-report");
 
   // Daily Report state — Firestore
@@ -370,30 +416,40 @@ export default function App() {
     });
   }, [loadingProjects, projects.length]);
 
-  // All project codes for dropdowns
-  const projectCodes = projects.map((p) => p.projectNo);
+  // โครงการที่ User มีสิทธิ์ (แอดมินจัดในแผงผู้ดูแล) — ไม่มี assignedProjects = เห็นทั้งหมด
+  const displayProjects = useMemo(() => {
+    const assigned = userProfile?.assignedProjects;
+    if (assigned?.length) return projects.filter((p) => assigned.includes(p.projectNo));
+    return projects;
+  }, [projects, userProfile?.assignedProjects]);
+  const projectCodes = displayProjects.map((p) => p.projectNo);
 
   // --- Daily Report handlers ---
+  const allowedProjectCodes = useMemo(() => {
+    const assigned = userProfile?.assignedProjects;
+    if (assigned?.length) return assigned;
+    return currentUser.project ? [currentUser.project] : [];
+  }, [userProfile?.assignedProjects, currentUser.project]);
+
   const filteredReports = useMemo(() => {
     return reports
       .filter((r) => {
-        if (currentUser.role.id === "staff") return r.project === currentUser.project;
-        if (currentUser.role.id === "site_mgr") return r.project === currentUser.project;
-        if (currentUser.role.id === "cm") {
-          return r.project === currentUser.project && ["PENDING_CM", "PENDING_CMG_MGR", "APPROVED"].includes(r.status);
-        }
-        if (currentUser.role.id === "cmg_mgr") return ["PENDING_CMG_MGR", "APPROVED"].includes(r.status);
-        if (currentUser.role.id === "exec") return r.status === "APPROVED";
+        if (workflowRoles.includes("staff") && allowedProjectCodes.includes(r.project)) return true;
+        if (workflowRoles.includes("site_mgr") && allowedProjectCodes.includes(r.project)) return true;
+        if (workflowRoles.includes("cm") && allowedProjectCodes.includes(r.project) && ["PENDING_CM", "PENDING_CMG_MGR", "APPROVED"].includes(r.status)) return true;
+        if (workflowRoles.includes("cmg_mgr") && ["PENDING_CMG_MGR", "APPROVED"].includes(r.status)) return true;
+        if (workflowRoles.includes("exec") && r.status === "APPROVED") return true;
         return false;
       })
       .sort((a, b) => b.id - a.id);
-  }, [reports, currentUser]);
+  }, [reports, workflowRoles, allowedProjectCodes]);
 
-  const handleCreateReport = async (newReport: Omit<Report, "id" | "project" | "staffName" | "status" | "history" | "acknowledgedByExecs">) => {
+  const handleCreateReport = async (newReport: Omit<Report, "id" | "project" | "staffName" | "status" | "history" | "acknowledgedByExecs" | "docNo">) => {
     const report: Report = {
       ...newReport,
       id: Date.now(),
       project: currentUser.project,
+      docNo: getNextDailyReportDocNo(currentUser.project, reports),
       staffName: currentUser.name,
       status: "PENDING_SITE_MGR",
       history: [{ role: "Safety Staff", action: "ส่งรายงาน", time: new Date().toLocaleTimeString("th-TH") }],
@@ -403,10 +459,11 @@ export default function App() {
     setReportView("list");
   };
 
-  const updateStatus = async (reportId: number, newStatus: string, actionLabel: string) => {
+  const updateStatus = async (reportId: number, newStatus: string, actionLabel: string, roleLabel?: string) => {
     const r = reports.find((r) => r.id === reportId);
     if (!r) return;
-    const updated = { ...r, status: newStatus, history: [...r.history, { role: currentUser.role.label, action: actionLabel, time: new Date().toLocaleTimeString("th-TH") }] };
+    const role = roleLabel ?? ROLE_LIST.find((ro) => workflowRoles.includes(ro.id as typeof WORKFLOW_ROLE_IDS[number]))?.label ?? "User";
+    const updated = { ...r, status: newStatus, history: [...r.history, { role, action: actionLabel, time: new Date().toLocaleTimeString("th-TH") }] };
     await saveReport(updated);
     setReportView("list");
   };
@@ -491,6 +548,19 @@ export default function App() {
     { key: "training-signin", label: "CMG-ใบลงชื่อเข้ารับการอบรม", icon: <ClipboardCheck size={18} /> },
   ];
 
+  const isAdmin = userProfile?.roles?.some((r) => r === "MasterAdmin" || r === "SuperAdmin" || r === "Admin");
+  const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
+  useEffect(() => {
+    if (!db || !isAdmin) return;
+    const ref = collection(doc(db, APP_NAME, "root"), "users");
+    getDocs(ref)
+      .then((snap) => {
+        const count = snap.docs.filter((d) => d.data()?.status === "pending").length;
+        setPendingApprovalCount(count);
+      })
+      .catch(() => {});
+  }, [isAdmin]);
+
   return (
     <div className="min-h-screen bg-gray-100 font-sans text-gray-800 flex flex-col">
       {!db && (
@@ -514,42 +584,19 @@ export default function App() {
         <div className="flex items-center gap-3">
           <div className="text-right hidden sm:block">
             <div className="text-sm font-semibold">{currentUser.name}</div>
-            <div className="text-xs text-yellow-300">{currentUser.role.label} ({currentUser.project})</div>
+            <div className="text-xs text-yellow-300 flex items-center justify-end gap-1">
+              <span>
+                {workflowRoles.length > 0
+                  ? workflowRoles.map((id) => ROLE_LIST.find((r) => r.id === id)?.label).filter(Boolean).join(", ")
+                  : "—"}
+              </span>
+              {projectCodes.length > 0 && (
+                <span> · {projectCodes.length === 1 ? projectCodes[0] : `${projectCodes.length} โครงการ`}</span>
+              )}
+            </div>
           </div>
-          <select
-            className="bg-blue-800 text-xs p-1 rounded border border-blue-600 outline-none"
-            value={currentUser.role.id}
-            onChange={(e) => {
-              const roleKey = Object.keys(ROLES).find(
-                (k) => ROLES[k as keyof typeof ROLES].id === e.target.value
-              ) as keyof typeof ROLES | undefined;
-              if (roleKey) setCurrentUser({ ...currentUser, role: ROLES[roleKey] });
-              setReportView("list");
-            }}
-          >
-            {(userProfile?.roles?.length
-              ? Object.values(ROLES).filter((ro) => userProfile.roles!.includes(ro.id as "staff" | "site_mgr" | "cm" | "cmg_mgr" | "exec"))
-              : Object.values(ROLES)
-            ).map((role) => (
-              <option key={role.id} value={role.id}>{role.label}</option>
-            ))}
-          </select>
-          <select
-            className="bg-blue-800 text-xs p-1 rounded border border-blue-600 outline-none"
-            value={currentUser.project}
-            onChange={(e) => setCurrentUser({ ...currentUser, project: e.target.value })}
-          >
-            {projectCodes.map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </select>
           {sessionMinutesLeft > 0 && (
             <span className="text-xs text-blue-200 hidden sm:inline">เหลือ {sessionMinutesLeft} นาที</span>
-          )}
-          {userProfile?.roles?.some((r) => r === "SuperAdmin" || r === "Admin") && (
-            <Link to="/admin" className="text-xs text-yellow-300 hover:text-white px-2 py-1 rounded hover:bg-blue-800 transition">
-              แผงผู้ดูแล
-            </Link>
           )}
           <button
             type="button"
@@ -588,6 +635,23 @@ export default function App() {
                 {item.label}
               </button>
             ))}
+            {isAdmin && (
+              <>
+                <p className="text-xs font-semibold text-gray-400 uppercase px-2 mb-2 mt-4">ผู้ดูแลระบบ</p>
+                <Link
+                  to="/admin"
+                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium mb-1 transition-colors text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200"
+                >
+                  <Settings size={18} />
+                  <span className="flex-1 text-left">แผงผู้ดูแล</span>
+                  {pendingApprovalCount > 0 && (
+                    <span className="bg-red-500 text-white text-xs font-bold min-w-[1.25rem] h-5 px-1.5 rounded-full flex items-center justify-center">
+                      {pendingApprovalCount}
+                    </span>
+                  )}
+                </Link>
+              </>
+            )}
           </nav>
           <div className="p-3 border-t border-gray-100">
             <div className="text-xs text-gray-400 text-center">v1.0.0 &copy; CMG Safety</div>
@@ -610,7 +674,7 @@ export default function App() {
             <>
               {projectView === "list" && (
                 <ProjectsList
-                  projects={projects}
+                  projects={displayProjects}
                   onAdd={() => { setEditingProject(null); setProjectView("form"); }}
                   onEdit={(p) => { setEditingProject(p); setProjectView("form"); }}
                   onDelete={handleDeleteProject}
@@ -633,6 +697,7 @@ export default function App() {
                 <DailyReportList
                   reports={filteredReports}
                   currentUser={currentUser}
+                  hasWorkflowRole={hasWorkflowRole}
                   onSelectReport={(r) => { setSelectedReport(r); setReportView("detail"); }}
                   onCreateReport={() => setReportView("create")}
                 />
@@ -647,6 +712,7 @@ export default function App() {
                 <ReportDetail
                   report={selectedReport}
                   currentUser={currentUser}
+                  hasWorkflowRole={hasWorkflowRole}
                   onBack={() => { setSelectedReport(null); setReportView("list"); }}
                   onUpdateStatus={updateStatus}
                   onMarkSeen={markAsSeen}
@@ -771,6 +837,25 @@ const SIGNIN_COLUMNS = [
   "หมายเหตุ",
 ];
 
+const SIGNIN_TABLE_COLUMNS: { key: string; label: string }[] = [
+  { key: "regDate", label: "วันที่ลงทะเบียน" },
+  { key: "timeSlot", label: "เวลาอบรม" },
+  { key: "seq", label: "ลำดับ" },
+  { key: "fullName1", label: "1.ชื่อ-นามสกุล" },
+  { key: "dept1", label: "1.สังกัด" },
+  { key: "position1", label: "1.ตำแหน่ง" },
+  { key: "company1", label: "1.บริษัท" },
+  { key: "link1", label: "1.Link ใบลงชื่อ" },
+  { key: "link2", label: "1.Link ใบรับรอง" },
+  { key: "totalCount", label: "จำนวนรวม" },
+  { key: "fullName2", label: "2.ชื่อ-นามสกุล" },
+  { key: "dept2", label: "2.สังกัด" },
+  { key: "company2", label: "2.บริษัท" },
+  { key: "link3", label: "2.Link ใบลงชื่อ" },
+  { key: "link4", label: "2.Link ใบรับรอง" },
+  { key: "remark", label: "หมายเหตุ" },
+];
+
 function signinToRow(r: TrainingSignIn): Record<string, string | number> {
   return {
     "วันที่ลงทะเบียน": r.regDate, "เวลาอบรม": r.timeSlot, "ลำดับ": r.seq,
@@ -820,6 +905,19 @@ function TrainingSignInList({
 }) {
   const [search, setSearch] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+  const [visibleColumns, setVisibleColumns] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(SIGNIN_TABLE_COLUMNS.map((c) => [c.key, true]))
+  );
+  const [columnPopupOpen, setColumnPopupOpen] = useState(false);
+  const columnPopupRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (columnPopupRef.current && !columnPopupRef.current.contains(e.target as Node)) setColumnPopupOpen(false);
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
 
   const filtered = records.filter(
     (r) =>
@@ -868,6 +966,31 @@ function TrainingSignInList({
           CMG — ใบลงชื่อเข้ารับการอบรม
         </h2>
         <div className="flex flex-wrap gap-2">
+          <div className="relative" ref={columnPopupRef}>
+            <button
+              type="button"
+              onClick={() => setColumnPopupOpen((o) => !o)}
+              className="flex items-center gap-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300 px-3 py-2 rounded-lg text-sm font-medium transition"
+            >
+              <Columns size={15} /> แสดง/ซ่อน คอลัมน์ <ChevronDown size={14} />
+            </button>
+            {columnPopupOpen && (
+              <div className="absolute left-0 top-full z-20 mt-1 min-w-[220px] bg-white border border-gray-200 rounded-lg shadow-lg py-2 max-h-72 overflow-y-auto">
+                <div className="px-3 py-1.5 text-xs font-semibold text-gray-500 border-b border-gray-100">เลือกคอลัมน์ที่ต้องการดู</div>
+                {SIGNIN_TABLE_COLUMNS.map((col) => (
+                  <label key={col.key} className="flex items-center gap-2 cursor-pointer text-sm hover:bg-gray-50 px-3 py-1.5">
+                    <input
+                      type="checkbox"
+                      checked={visibleColumns[col.key] !== false}
+                      onChange={() => setVisibleColumns((prev) => ({ ...prev, [col.key]: !prev[col.key] }))}
+                      className="rounded border-gray-300 text-blue-500 focus:ring-blue-400"
+                    />
+                    <span className="text-gray-700">{col.label}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
           <button onClick={handleExportTemplate}
             className="flex items-center gap-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300 px-3 py-2 rounded-lg text-sm font-medium transition">
             <FileDown size={15} /> ดาวน์โหลด Template
@@ -904,22 +1027,9 @@ function TrainingSignInList({
             <thead>
               <tr className="bg-blue-700 text-white text-xs">
                 <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">#</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">วันที่ลงทะเบียน</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">เวลาอบรม</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">ลำดับ</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">1.ชื่อ-นามสกุล</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">1.สังกัด</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">1.ตำแหน่ง</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">1.บริษัท</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">1.Link ใบลงชื่อ</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">1.Link ใบรับรอง</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">จำนวนรวม</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">2.ชื่อ-นามสกุล</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">2.สังกัด</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">2.บริษัท</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">2.Link ใบลงชื่อ</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">2.Link ใบรับรอง</th>
-                <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">หมายเหตุ</th>
+                {SIGNIN_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((c) => (
+                  <th key={c.key} className="px-3 py-2 text-left font-semibold whitespace-nowrap">{c.label}</th>
+                ))}
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
@@ -927,34 +1037,30 @@ function TrainingSignInList({
               {filtered.map((r, idx) => (
                 <tr key={r.id} className={idx % 2 === 0 ? "bg-blue-50" : "bg-white"}>
                   <td className="px-3 py-2 text-gray-500">{idx + 1}</td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{r.regDate}</td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{r.timeSlot}</td>
-                  <td className="px-3 py-2 text-gray-600 text-center">{r.seq}</td>
-                  <td className="px-3 py-2 font-medium text-gray-800 whitespace-nowrap">{r.fullName1}</td>
-                  <td className="px-3 py-2 text-gray-600">{r.dept1}</td>
-                  <td className="px-3 py-2 text-gray-600">{r.position1}</td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{r.company1}</td>
-                  <td className="px-3 py-2">
-                    {r.link1 ? <a href={r.link1} target="_blank" rel="noreferrer" className="text-blue-500 hover:underline text-xs">เปิดลิงก์</a> : <span className="text-gray-300 text-xs">-</span>}
-                  </td>
-                  <td className="px-3 py-2">
-                    {r.link2 ? <a href={r.link2} target="_blank" rel="noreferrer" className="text-blue-500 hover:underline text-xs">เปิดลิงก์</a> : <span className="text-gray-300 text-xs">-</span>}
-                  </td>
-                  <td className="px-3 py-2 text-center font-semibold text-blue-700">{r.totalCount || "-"}</td>
-                  <td className="px-3 py-2 font-medium text-gray-800 whitespace-nowrap">{r.fullName2}</td>
-                  <td className="px-3 py-2 text-gray-600">{r.dept2}</td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{r.company2}</td>
-                  <td className="px-3 py-2">
-                    {r.link3 ? <a href={r.link3} target="_blank" rel="noreferrer" className="text-blue-500 hover:underline text-xs">เปิดลิงก์</a> : <span className="text-gray-300 text-xs">-</span>}
-                  </td>
-                  <td className="px-3 py-2">
-                    {r.link4 ? <a href={r.link4} target="_blank" rel="noreferrer" className="text-blue-500 hover:underline text-xs">เปิดลิงก์</a> : <span className="text-gray-300 text-xs">-</span>}
-                  </td>
-                  <td className="px-3 py-2 text-gray-500">{r.remark}</td>
+                  {SIGNIN_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((col) => (
+                    <td key={col.key} className="px-3 py-2 text-gray-600 whitespace-nowrap">
+                      {col.key === "regDate" && r.regDate}
+                      {col.key === "timeSlot" && r.timeSlot}
+                      {col.key === "seq" && <span className="text-center block">{r.seq}</span>}
+                      {col.key === "fullName1" && <span className="font-medium text-gray-800">{r.fullName1}</span>}
+                      {col.key === "dept1" && r.dept1}
+                      {col.key === "position1" && r.position1}
+                      {col.key === "company1" && r.company1}
+                      {col.key === "link1" && (r.link1 ? <a href={r.link1} target="_blank" rel="noreferrer" className="text-blue-500 hover:underline text-xs">เปิดลิงก์</a> : <span className="text-gray-300 text-xs">-</span>)}
+                      {col.key === "link2" && (r.link2 ? <a href={r.link2} target="_blank" rel="noreferrer" className="text-blue-500 hover:underline text-xs">เปิดลิงก์</a> : <span className="text-gray-300 text-xs">-</span>)}
+                      {col.key === "totalCount" && <span className="text-center font-semibold text-blue-700 block">{r.totalCount || "-"}</span>}
+                      {col.key === "fullName2" && <span className="font-medium text-gray-800">{r.fullName2}</span>}
+                      {col.key === "dept2" && r.dept2}
+                      {col.key === "company2" && r.company2}
+                      {col.key === "link3" && (r.link3 ? <a href={r.link3} target="_blank" rel="noreferrer" className="text-blue-500 hover:underline text-xs">เปิดลิงก์</a> : <span className="text-gray-300 text-xs">-</span>)}
+                      {col.key === "link4" && (r.link4 ? <a href={r.link4} target="_blank" rel="noreferrer" className="text-blue-500 hover:underline text-xs">เปิดลิงก์</a> : <span className="text-gray-300 text-xs">-</span>)}
+                      {col.key === "remark" && r.remark}
+                    </td>
+                  ))}
                   <td className="px-3 py-2">
                     <div className="flex gap-1">
-                      <button onClick={() => onEdit(r)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition" title="แก้ไข"><Pencil size={14} /></button>
-                      <button onClick={() => onDelete(r.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded transition" title="ลบ"><Trash2 size={14} /></button>
+                      <button onClick={(e) => { e.stopPropagation(); onEdit(r); }} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition" title="แก้ไข"><Pencil size={14} /></button>
+                      <button onClick={(e) => { e.stopPropagation(); onDelete(r.id); }} className="p-1.5 text-red-500 hover:bg-red-50 rounded transition" title="ลบ"><Trash2 size={14} /></button>
                     </div>
                   </td>
                 </tr>
@@ -1108,6 +1214,23 @@ function rowToCrane(row: Record<string, string>, id: number): CraneTrainee {
   };
 }
 
+const CRANE_TABLE_COLUMNS: { key: string; label: string }[] = [
+  { key: "fullName", label: "ชื่อ-สกุล" },
+  { key: "company", label: "ต้นสังกัด" },
+  { key: "position", label: "ตำแหน่ง" },
+  { key: "type", label: "ประเภทปั้นจั่น" },
+  { key: "status", label: "สถานะ" },
+  { key: "project", label: "โครงการ" },
+  { key: "lastTrainDate", label: "วันที่อบรมล่าสุด" },
+  { key: "institute", label: "สถาบัน" },
+  { key: "cer", label: "CER." },
+  { key: "round1", label: "ครั้งที่ 1 (วันที่)" },
+  { key: "round2", label: "ครั้งที่ 2 (วันที่)" },
+  { key: "round3", label: "ครั้งที่ 3 (วันที่)" },
+  { key: "remark", label: "หมายเหตุ" },
+  { key: "checkDate", label: "วันที่เช็ค" },
+];
+
 function CraneRegisterList({
   trainees,
   onAdd,
@@ -1123,6 +1246,21 @@ function CraneRegisterList({
 }) {
   const [search, setSearch] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+  const [visibleColumns, setVisibleColumns] = useState<Record<string, boolean>>(() =>
+    CRANE_TABLE_COLUMNS.reduce((acc, c) => ({ ...acc, [c.key]: true }), {})
+  );
+  const [columnPopupOpen, setColumnPopupOpen] = useState(false);
+  const columnPopupRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (columnPopupRef.current && !columnPopupRef.current.contains(e.target as Node)) setColumnPopupOpen(false);
+    };
+    if (columnPopupOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+      return () => document.removeEventListener("mousedown", handleClickOutside);
+    }
+  }, [columnPopupOpen]);
 
   const filtered = trainees.filter(
     (t) =>
@@ -1170,6 +1308,31 @@ function CraneRegisterList({
           ทะเบียนรายชื่อผู้อบรมปั้นจั่น (Crane)
         </h2>
         <div className="flex flex-wrap gap-2">
+          <div className="relative" ref={columnPopupRef}>
+            <button
+              type="button"
+              onClick={() => setColumnPopupOpen((o) => !o)}
+              className="flex items-center gap-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300 px-3 py-2 rounded-lg text-sm font-medium transition"
+            >
+              <Columns size={15} /> แสดง/ซ่อน คอลัมน์ <ChevronDown size={14} />
+            </button>
+            {columnPopupOpen && (
+              <div className="absolute left-0 top-full z-20 mt-1 min-w-[220px] bg-white border border-gray-200 rounded-lg shadow-lg py-2 max-h-72 overflow-y-auto">
+                <div className="px-3 py-1.5 text-xs font-semibold text-gray-500 border-b border-gray-100">เลือกคอลัมน์ที่ต้องการดู</div>
+                {CRANE_TABLE_COLUMNS.map((col) => (
+                  <label key={col.key} className="flex items-center gap-2 cursor-pointer text-sm hover:bg-gray-50 px-3 py-1.5">
+                    <input
+                      type="checkbox"
+                      checked={visibleColumns[col.key] !== false}
+                      onChange={() => setVisibleColumns((prev) => ({ ...prev, [col.key]: !prev[col.key] }))}
+                      className="rounded border-gray-300 text-yellow-500 focus:ring-yellow-400"
+                    />
+                    <span className="text-gray-700">{col.label}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
           <button onClick={handleExportTemplate}
             className="flex items-center gap-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300 px-3 py-2 rounded-lg text-sm font-medium transition">
             <FileDown size={15} /> ดาวน์โหลด Template
@@ -1206,20 +1369,9 @@ function CraneRegisterList({
             <thead>
               <tr className="bg-yellow-500 text-white text-xs">
                 <th className="px-3 py-2 text-left font-semibold">#</th>
-                <th className="px-3 py-2 text-left font-semibold">ชื่อ-สกุล</th>
-                <th className="px-3 py-2 text-left font-semibold">ต้นสังกัด</th>
-                <th className="px-3 py-2 text-left font-semibold">ตำแหน่ง</th>
-                <th className="px-3 py-2 text-left font-semibold">ประเภทปั้นจั่น</th>
-                <th className="px-3 py-2 text-left font-semibold">สถานะ</th>
-                <th className="px-3 py-2 text-left font-semibold">โครงการ</th>
-                <th className="px-3 py-2 text-left font-semibold">วันที่อบรมล่าสุด</th>
-                <th className="px-3 py-2 text-left font-semibold">สถาบัน</th>
-                <th className="px-3 py-2 text-left font-semibold">CER.</th>
-                <th className="px-3 py-2 text-left font-semibold">ครั้งที่ 1 (วันที่)</th>
-                <th className="px-3 py-2 text-left font-semibold">ครั้งที่ 2 (วันที่)</th>
-                <th className="px-3 py-2 text-left font-semibold">ครั้งที่ 3 (วันที่)</th>
-                <th className="px-3 py-2 text-left font-semibold">หมายเหตุ</th>
-                <th className="px-3 py-2 text-left font-semibold">วันที่เช็ค</th>
+                {CRANE_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((c) => (
+                  <th key={c.key} className="px-3 py-2 text-left font-semibold">{c.label}</th>
+                ))}
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
@@ -1227,22 +1379,26 @@ function CraneRegisterList({
               {filtered.map((t, idx) => (
                 <tr key={t.id} className={idx % 2 === 0 ? "bg-yellow-50" : "bg-white"}>
                   <td className="px-3 py-2 text-gray-500">{idx + 1}</td>
-                  <td className="px-3 py-2 font-medium text-gray-800 whitespace-nowrap">{t.fullName}</td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{t.company}</td>
-                  <td className="px-3 py-2 text-gray-600">{t.position}</td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{t.type}</td>
-                  <td className="px-3 py-2">
-                    <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 border border-green-200">{t.status}</span>
-                  </td>
-                  <td className="px-3 py-2 text-gray-600">{t.project}</td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{t.lastTrainDate}</td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{t.institute}</td>
-                  <td className="px-3 py-2 text-gray-600">{t.cer}</td>
-                  <td className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap">{t.round1.date || "-"}</td>
-                  <td className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap">{t.round2.date || "-"}</td>
-                  <td className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap">{t.round3.date || "-"}</td>
-                  <td className="px-3 py-2 text-gray-500">{t.remark}</td>
-                  <td className="px-3 py-2 text-gray-500 whitespace-nowrap">{t.checkDate}</td>
+                  {CRANE_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((col) => (
+                    <td key={col.key} className="px-3 py-2 text-gray-600 whitespace-nowrap">
+                      {col.key === "fullName" && <span className="font-medium text-gray-800">{t.fullName}</span>}
+                      {col.key === "company" && t.company}
+                      {col.key === "position" && t.position}
+                      {col.key === "type" && t.type}
+                      {col.key === "status" && (
+                        <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 border border-green-200">{t.status}</span>
+                      )}
+                      {col.key === "project" && t.project}
+                      {col.key === "lastTrainDate" && t.lastTrainDate}
+                      {col.key === "institute" && t.institute}
+                      {col.key === "cer" && t.cer}
+                      {col.key === "round1" && (t.round1.date || "-")}
+                      {col.key === "round2" && (t.round2.date || "-")}
+                      {col.key === "round3" && (t.round3.date || "-")}
+                      {col.key === "remark" && t.remark}
+                      {col.key === "checkDate" && t.checkDate}
+                    </td>
+                  ))}
                   <td className="px-3 py-2">
                     <div className="flex gap-1">
                       <button onClick={() => onEdit(t)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition" title="แก้ไข"><Pencil size={14} /></button>
@@ -1381,6 +1537,23 @@ const CONFINED_COLUMNS = [
   "หมายเหตุ", "วันที่เช็ค",
 ];
 
+const CONFINED_TABLE_COLUMNS: { key: string; label: string }[] = [
+  { key: "fullName", label: "ชื่อ-สกุล" },
+  { key: "company", label: "ต้นสังกัด" },
+  { key: "position", label: "ตำแหน่ง" },
+  { key: "type", label: "ประเภท" },
+  { key: "status", label: "สถานะ" },
+  { key: "project", label: "โครงการ" },
+  { key: "course", label: "หลักสูตร" },
+  { key: "lastTrainDate", label: "วันที่อบรมล่าสุด" },
+  { key: "institute", label: "สถาบัน" },
+  { key: "cer", label: "CER." },
+  { key: "renewal3yrDate", label: "ครบรอบ 3 ปี (วันที่)" },
+  { key: "renewal3yrCer", label: "CER. ใหม่" },
+  { key: "remark", label: "หมายเหตุ" },
+  { key: "checkDate", label: "วันที่เช็ค" },
+];
+
 function confinedToRow(t: ConfinedSpaceTrainee): Record<string, string> {
   return {
     "ชื่อ-สกุล": t.fullName, "ต้นสังกัด": t.company, "ตำแหน่ง": t.position,
@@ -1419,6 +1592,19 @@ function ConfinedSpaceRegisterList({
 }) {
   const [search, setSearch] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+  const [visibleColumns, setVisibleColumns] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(CONFINED_TABLE_COLUMNS.map((c) => [c.key, true]))
+  );
+  const [columnPopupOpen, setColumnPopupOpen] = useState(false);
+  const columnPopupRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (columnPopupRef.current && !columnPopupRef.current.contains(e.target as Node)) setColumnPopupOpen(false);
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
 
   const filtered = trainees.filter(
     (t) =>
@@ -1466,6 +1652,31 @@ function ConfinedSpaceRegisterList({
           ทะเบียนรายชื่อผู้อบรมที่อับอากาศ (Confined Space)
         </h2>
         <div className="flex flex-wrap gap-2">
+          <div className="relative" ref={columnPopupRef}>
+            <button
+              type="button"
+              onClick={() => setColumnPopupOpen((o) => !o)}
+              className="flex items-center gap-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300 px-3 py-2 rounded-lg text-sm font-medium transition"
+            >
+              <Columns size={15} /> แสดง/ซ่อน คอลัมน์ <ChevronDown size={14} />
+            </button>
+            {columnPopupOpen && (
+              <div className="absolute left-0 top-full z-20 mt-1 min-w-[220px] bg-white border border-gray-200 rounded-lg shadow-lg py-2 max-h-72 overflow-y-auto">
+                <div className="px-3 py-1.5 text-xs font-semibold text-gray-500 border-b border-gray-100">เลือกคอลัมน์ที่ต้องการดู</div>
+                {CONFINED_TABLE_COLUMNS.map((col) => (
+                  <label key={col.key} className="flex items-center gap-2 cursor-pointer text-sm hover:bg-gray-50 px-3 py-1.5">
+                    <input
+                      type="checkbox"
+                      checked={visibleColumns[col.key] !== false}
+                      onChange={() => setVisibleColumns((prev) => ({ ...prev, [col.key]: !prev[col.key] }))}
+                      className="rounded border-gray-300 text-teal-500 focus:ring-teal-400"
+                    />
+                    <span className="text-gray-700">{col.label}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
           <button onClick={handleExportTemplate}
             className="flex items-center gap-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300 px-3 py-2 rounded-lg text-sm font-medium transition">
             <FileDown size={15} /> ดาวน์โหลด Template
@@ -1502,20 +1713,9 @@ function ConfinedSpaceRegisterList({
             <thead>
               <tr className="bg-teal-600 text-white text-xs">
                 <th className="px-3 py-2 text-left font-semibold">#</th>
-                <th className="px-3 py-2 text-left font-semibold">ชื่อ-สกุล</th>
-                <th className="px-3 py-2 text-left font-semibold">ต้นสังกัด</th>
-                <th className="px-3 py-2 text-left font-semibold">ตำแหน่ง</th>
-                <th className="px-3 py-2 text-left font-semibold">ประเภท</th>
-                <th className="px-3 py-2 text-left font-semibold">สถานะ</th>
-                <th className="px-3 py-2 text-left font-semibold">โครงการ</th>
-                <th className="px-3 py-2 text-left font-semibold">หลักสูตร</th>
-                <th className="px-3 py-2 text-left font-semibold">วันที่อบรมล่าสุด</th>
-                <th className="px-3 py-2 text-left font-semibold">สถาบัน</th>
-                <th className="px-3 py-2 text-left font-semibold">CER.</th>
-                <th className="px-3 py-2 text-left font-semibold">ครบรอบ 3 ปี (วันที่)</th>
-                <th className="px-3 py-2 text-left font-semibold">CER. ใหม่</th>
-                <th className="px-3 py-2 text-left font-semibold">หมายเหตุ</th>
-                <th className="px-3 py-2 text-left font-semibold">วันที่เช็ค</th>
+                {CONFINED_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((c) => (
+                  <th key={c.key} className="px-3 py-2 text-left font-semibold">{c.label}</th>
+                ))}
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
@@ -1523,22 +1723,26 @@ function ConfinedSpaceRegisterList({
               {filtered.map((t, idx) => (
                 <tr key={t.id} className={idx % 2 === 0 ? "bg-teal-50" : "bg-white"}>
                   <td className="px-3 py-2 text-gray-500">{idx + 1}</td>
-                  <td className="px-3 py-2 font-medium text-gray-800 whitespace-nowrap">{t.fullName}</td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{t.company}</td>
-                  <td className="px-3 py-2 text-gray-600">{t.position}</td>
-                  <td className="px-3 py-2 text-gray-600">{t.type}</td>
-                  <td className="px-3 py-2">
-                    <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 border border-green-200">{t.status}</span>
-                  </td>
-                  <td className="px-3 py-2 text-gray-600">{t.project}</td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{t.course}</td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{t.lastTrainDate}</td>
-                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{t.institute}</td>
-                  <td className="px-3 py-2 text-gray-600">{t.cer}</td>
-                  <td className="px-3 py-2 text-gray-500 whitespace-nowrap">{t.renewal3yr.date || "-"}</td>
-                  <td className="px-3 py-2 text-gray-500">{t.renewal3yr.cer || "-"}</td>
-                  <td className="px-3 py-2 text-gray-500">{t.remark}</td>
-                  <td className="px-3 py-2 text-gray-500 whitespace-nowrap">{t.checkDate}</td>
+                  {CONFINED_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((col) => (
+                    <td key={col.key} className="px-3 py-2 text-gray-600 whitespace-nowrap">
+                      {col.key === "fullName" && <span className="font-medium text-gray-800">{t.fullName}</span>}
+                      {col.key === "company" && t.company}
+                      {col.key === "position" && t.position}
+                      {col.key === "type" && t.type}
+                      {col.key === "status" && (
+                        <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 border border-green-200">{t.status}</span>
+                      )}
+                      {col.key === "project" && t.project}
+                      {col.key === "course" && t.course}
+                      {col.key === "lastTrainDate" && t.lastTrainDate}
+                      {col.key === "institute" && t.institute}
+                      {col.key === "cer" && t.cer}
+                      {col.key === "renewal3yrDate" && (t.renewal3yr.date || "-")}
+                      {col.key === "renewal3yrCer" && (t.renewal3yr.cer || "-")}
+                      {col.key === "remark" && t.remark}
+                      {col.key === "checkDate" && t.checkDate}
+                    </td>
+                  ))}
                   <td className="px-3 py-2">
                     <div className="flex gap-1">
                       <button onClick={() => onEdit(t)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition" title="แก้ไข"><Pencil size={14} /></button>
@@ -1949,11 +2153,13 @@ function ProjectForm({
 function DailyReportList({
   reports,
   currentUser,
+  hasWorkflowRole,
   onSelectReport,
   onCreateReport,
 }: {
   reports: Report[];
   currentUser: User;
+  hasWorkflowRole: (roleId: string) => boolean;
   onSelectReport: (r: Report) => void;
   onCreateReport: () => void;
 }) {
@@ -1964,7 +2170,7 @@ function DailyReportList({
           <ClipboardList className="text-blue-600" size={22} />
           Daily Report — รายงานประจำวัน
         </h2>
-        {currentUser.role.id === "staff" && (
+        {hasWorkflowRole("staff") && (
           <button
             onClick={onCreateReport}
             className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 shadow-sm transition text-sm font-medium"
@@ -1987,8 +2193,8 @@ function DailyReportList({
               className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition cursor-pointer flex justify-between items-center"
             >
               <div>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-0.5 rounded">{report.project}</span>
+                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                  <span className="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-0.5 rounded">{getReportDocNo(report)}</span>
                   <span className="text-gray-500 text-xs flex items-center gap-1"><Clock size={12} /> {report.date}</span>
                 </div>
                 <h3 className="font-medium text-gray-800">{report.toolboxTopic || "No Topic"}</h3>
@@ -1996,7 +2202,7 @@ function DailyReportList({
               </div>
               <div className="flex flex-col items-end gap-2">
                 <StatusBadge status={report.status} />
-                {currentUser.role.id === "exec" && report.acknowledgedByExecs.includes(currentUser.name) && (
+                {hasWorkflowRole("exec") && report.acknowledgedByExecs.includes(currentUser.name) && (
                   <span className="text-xs text-green-600 flex items-center gap-1"><Eye size={12} /> รับรู้แล้ว</span>
                 )}
                 <ChevronRight size={16} className="text-gray-400" />
@@ -2349,7 +2555,10 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+const MAX_IMAGES_PER_ITEM = 5;
+
 function ReportForm({ onCancel, onSubmit }: { onCancel: () => void; onSubmit: (data: any) => void }) {
+  const { firebaseUser } = useAuth();
   const [formData, setFormData] = useState<{
     date: string;
     toolboxTopic: string;
@@ -2357,6 +2566,7 @@ function ReportForm({ onCancel, onSubmit }: { onCancel: () => void; onSubmit: (d
     training: string;
     accident: string;
     checklist: Record<number, string>;
+    checklistImages: Record<number, string[]>;
   }>({
     date: new Date().toISOString().split("T")[0],
     toolboxTopic: "",
@@ -2367,13 +2577,60 @@ function ReportForm({ onCancel, onSubmit }: { onCancel: () => void; onSubmit: (d
       (acc, item) => ({ ...acc, [item.id]: "pass" }),
       {} as Record<number, string>
     ),
+    checklistImages: {},
   });
+  const [uploadingItemId, setUploadingItemId] = useState<number | null>(null);
 
   const handleChecklistChange = (id: number, val: string) => {
     setFormData((prev) => ({
       ...prev,
       checklist: { ...prev.checklist, [id]: val },
     }));
+  };
+
+  const uploadChecklistImage = async (itemId: number, file: File): Promise<string | null> => {
+    if (!storage || !firebaseUser?.uid) return null;
+    const path = `daily-reports/${firebaseUser.uid}_${Date.now()}_${itemId}_${file.name}`;
+    const storageRef = ref(storage, path);
+    await uploadBytesResumable(storageRef, file);
+    const url = await getDownloadURL(storageRef);
+    return url;
+  };
+
+  const handleImageSelect = async (itemId: number, e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    const current = formData.checklistImages[itemId] || [];
+    if (current.length >= MAX_IMAGES_PER_ITEM) return;
+    setUploadingItemId(itemId);
+    try {
+      const file = files[0];
+      const url = await uploadChecklistImage(itemId, file);
+      if (url) {
+        setFormData((prev) => ({
+          ...prev,
+          checklistImages: {
+            ...prev.checklistImages,
+            [itemId]: [...(prev.checklistImages[itemId] || []), url].slice(0, MAX_IMAGES_PER_ITEM),
+          },
+        }));
+      }
+    } catch (err) {
+      console.error("Upload failed:", err);
+    } finally {
+      setUploadingItemId(null);
+      e.target.value = "";
+    }
+  };
+
+  const removeChecklistImage = (itemId: number, index: number) => {
+    setFormData((prev) => {
+      const list = (prev.checklistImages[itemId] || []).filter((_, i) => i !== index);
+      const next = { ...prev.checklistImages };
+      if (list.length) next[itemId] = list;
+      else delete next[itemId];
+      return { ...prev, checklistImages: next };
+    });
   };
 
   return (
@@ -2452,47 +2709,89 @@ function ReportForm({ onCancel, onSubmit }: { onCancel: () => void; onSubmit: (d
             <CheckCircle size={18} className="text-green-600" />
             2.4 การตรวจความปลอดภัยประจำวัน
           </h3>
-          <div className="space-y-3 bg-gray-50 p-4 rounded-lg">
-            {CHECKLIST_ITEMS.map((item) => (
-              <div
-                key={item.id}
-                className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-200 last:border-0 pb-2 last:pb-0"
-              >
-                <span className="text-sm text-gray-700">{item.text}</span>
-                <div className="flex gap-2">
-                  <label className="inline-flex items-center">
-                    <input
-                      type="radio"
-                      name={`chk-${item.id}`}
-                      checked={formData.checklist[item.id] === "pass"}
-                      onChange={() => handleChecklistChange(item.id, "pass")}
-                      className="text-green-600 focus:ring-green-500"
-                    />
-                    <span className="ml-1 text-xs text-gray-600">ปกติ</span>
-                  </label>
-                  <label className="inline-flex items-center">
-                    <input
-                      type="radio"
-                      name={`chk-${item.id}`}
-                      checked={formData.checklist[item.id] === "warn"}
-                      onChange={() => handleChecklistChange(item.id, "warn")}
-                      className="text-yellow-600 focus:ring-yellow-500"
-                    />
-                    <span className="ml-1 text-xs text-gray-600">แก้ไข</span>
-                  </label>
-                  <label className="inline-flex items-center">
-                    <input
-                      type="radio"
-                      name={`chk-${item.id}`}
-                      checked={formData.checklist[item.id] === "fail"}
-                      onChange={() => handleChecklistChange(item.id, "fail")}
-                      className="text-red-600 focus:ring-red-500"
-                    />
-                    <span className="ml-1 text-xs text-gray-600">อันตราย</span>
-                  </label>
+          <div className="space-y-4 bg-gray-50 p-4 rounded-lg">
+            {CHECKLIST_ITEMS.map((item) => {
+              const images = formData.checklistImages[item.id] || [];
+              const canAdd = images.length < MAX_IMAGES_PER_ITEM;
+              const isUploading = uploadingItemId === item.id;
+              return (
+                <div
+                  key={item.id}
+                  className="flex flex-col gap-2 border-b border-gray-200 last:border-0 pb-4 last:pb-0"
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <span className="text-sm text-gray-700">{item.text}</span>
+                    <div className="flex gap-2 flex-shrink-0">
+                      <label className="inline-flex items-center">
+                        <input
+                          type="radio"
+                          name={`chk-${item.id}`}
+                          checked={formData.checklist[item.id] === "pass"}
+                          onChange={() => handleChecklistChange(item.id, "pass")}
+                          className="text-green-600 focus:ring-green-500"
+                        />
+                        <span className="ml-1 text-xs text-gray-600">ปกติ</span>
+                      </label>
+                      <label className="inline-flex items-center">
+                        <input
+                          type="radio"
+                          name={`chk-${item.id}`}
+                          checked={formData.checklist[item.id] === "warn"}
+                          onChange={() => handleChecklistChange(item.id, "warn")}
+                          className="text-yellow-600 focus:ring-yellow-500"
+                        />
+                        <span className="ml-1 text-xs text-gray-600">แก้ไข</span>
+                      </label>
+                      <label className="inline-flex items-center">
+                        <input
+                          type="radio"
+                          name={`chk-${item.id}`}
+                          checked={formData.checklist[item.id] === "fail"}
+                          onChange={() => handleChecklistChange(item.id, "fail")}
+                          className="text-red-600 focus:ring-red-500"
+                        />
+                        <span className="ml-1 text-xs text-gray-600">อันตราย</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 pl-0 sm:pl-2">
+                    <span className="text-xs text-gray-500">อัปโหลดรูป (ไม่บังคับ สูงสุด {MAX_IMAGES_PER_ITEM} รูป)</span>
+                    {canAdd && (
+                      <label className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-300 bg-white text-xs text-gray-700 cursor-pointer hover:bg-gray-50">
+                        <Upload size={14} />
+                        {isUploading ? "กำลังอัปโหลด..." : "เลือกรูป"}
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          disabled={isUploading}
+                          onChange={(e) => handleImageSelect(item.id, e)}
+                        />
+                      </label>
+                    )}
+                  </div>
+                  {images.length > 0 && (
+                    <div className="flex flex-wrap gap-2 pl-0 sm:pl-2">
+                      {images.map((url, idx) => (
+                        <div key={url} className="relative group">
+                          <a href={url} target="_blank" rel="noopener noreferrer" className="block">
+                            <img src={url} alt={`รูป ${idx + 1}`} className="w-16 h-16 object-cover rounded border border-gray-200 shadow-sm" />
+                          </a>
+                          <button
+                            type="button"
+                            onClick={() => removeChecklistImage(item.id, idx)}
+                            className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white flex items-center justify-center opacity-90 group-hover:opacity-100 text-xs"
+                            title="ลบรูป"
+                          >
+                            <X size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
 
@@ -2531,7 +2830,7 @@ function ReportForm({ onCancel, onSubmit }: { onCancel: () => void; onSubmit: (d
           ยกเลิก
         </button>
         <button
-          onClick={() => onSubmit(formData)}
+          onClick={() => onSubmit({ ...formData, checklistImages: formData.checklistImages || {} })}
           className="px-6 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 shadow-sm transition-colors"
         >
           ส่งรายงาน
@@ -2544,47 +2843,46 @@ function ReportForm({ onCancel, onSubmit }: { onCancel: () => void; onSubmit: (d
 function ReportDetail({
   report,
   currentUser,
+  hasWorkflowRole,
   onBack,
   onUpdateStatus,
   onMarkSeen,
 }: {
   report: Report;
   currentUser: User;
+  hasWorkflowRole: (roleId: string) => boolean;
   onBack: () => void;
-  onUpdateStatus: (id: number, status: string, label: string) => void;
+  onUpdateStatus: (id: number, status: string, label: string, roleLabel?: string) => void;
   onMarkSeen: (id: number) => void;
 }) {
-  // Logic to determine available actions
+  // Logic to determine available actions — ใช้สิทธิ์บทบาทที่ User มี (ไม่ต้องเลือกสลับ)
   let canAction = false;
   let actionLabel = "";
   let nextStatus = "";
   let buttonColor = "";
+  let actionRoleLabel = "";
 
-  if (
-    currentUser.role.id === "site_mgr" &&
-    report.status === "PENDING_SITE_MGR"
-  ) {
+  if (hasWorkflowRole("site_mgr") && report.status === "PENDING_SITE_MGR") {
     canAction = true;
     actionLabel = "รับทราบ (ส่งต่อ CM)";
     nextStatus = "PENDING_CM";
     buttonColor = "bg-blue-600 hover:bg-blue-700";
-  } else if (currentUser.role.id === "cm" && report.status === "PENDING_CM") {
+    actionRoleLabel = "Site Safety Manager";
+  } else if (hasWorkflowRole("cm") && report.status === "PENDING_CM") {
     canAction = true;
     actionLabel = "รับทราบ (ส่งต่อ CMG Mgr)";
     nextStatus = "PENDING_CMG_MGR";
     buttonColor = "bg-blue-600 hover:bg-blue-700";
-  } else if (
-    currentUser.role.id === "cmg_mgr" &&
-    report.status === "PENDING_CMG_MGR"
-  ) {
+    actionRoleLabel = "Construction Manager (CM)";
+  } else if (hasWorkflowRole("cmg_mgr") && report.status === "PENDING_CMG_MGR") {
     canAction = true;
     actionLabel = "อนุมัติ (บันทึกเข้าระบบ)";
     nextStatus = "APPROVED";
     buttonColor = "bg-green-600 hover:bg-green-700";
+    actionRoleLabel = "CMG Safety Manager";
   }
 
-  // Exec logic
-  const isExec = currentUser.role.id === "exec";
+  const isExec = hasWorkflowRole("exec");
   const hasSeen = report.acknowledgedByExecs.includes(currentUser.name);
 
   return (
@@ -2606,9 +2904,9 @@ function ReportDetail({
       <div className="p-6">
         {/* Title */}
         <div className="mb-6">
-          <div className="flex items-center gap-2 mb-2">
+          <div className="flex items-center gap-2 mb-2 flex-wrap">
             <span className="bg-blue-600 text-white text-xs font-bold px-2 py-0.5 rounded">
-              {report.project}
+              Doc No. {getReportDocNo(report)}
             </span>
             <span className="text-gray-500 text-sm">{report.date}</span>
           </div>
@@ -2677,6 +2975,28 @@ function ReportDetail({
               );
             })}
           </div>
+          {/* รูปภาพแนบรายการ 2.4 */}
+          {report.checklistImages && Object.keys(report.checklistImages).length > 0 && (
+            <div className="mt-4 pt-4 border-t border-gray-200">
+              <h4 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-1">
+                <Camera size={16} /> รูปภาพแนบการตรวจความปลอดภัยประจำวัน
+              </h4>
+              <div className="space-y-3">
+                {CHECKLIST_ITEMS.filter((item) => (report.checklistImages || {})[item.id]?.length).map((item) => (
+                  <div key={item.id}>
+                    <p className="text-xs text-gray-600 mb-1">{item.category}</p>
+                    <div className="flex flex-wrap gap-2">
+                      {(report.checklistImages![item.id] || []).map((url, idx) => (
+                        <a key={url} href={url} target="_blank" rel="noopener noreferrer" className="block">
+                          <img src={url} alt={`${item.category} ${idx + 1}`} className="w-20 h-20 object-cover rounded border border-gray-200 shadow-sm hover:opacity-90" />
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Approval History */}
@@ -2726,7 +3046,7 @@ function ReportDetail({
         {canAction ? (
           <button
             onClick={() =>
-              onUpdateStatus(report.id, nextStatus, actionLabel.split(" ")[0])
+              onUpdateStatus(report.id, nextStatus, actionLabel.split(" ")[0], actionRoleLabel)
             }
             className={`w-full py-3 rounded-lg text-white font-bold shadow-md transition-transform transform active:scale-95 ${buttonColor}`}
           >

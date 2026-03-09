@@ -22,7 +22,7 @@ export function AppRouter() {
             </ProtectedRoute>
           } />
           <Route path="/admin" element={
-            <ProtectedRoute requireApproved={true} requireRoles={["SuperAdmin", "Admin"]}>
+            <ProtectedRoute requireApproved={true} requireRoles={["MasterAdmin", "SuperAdmin", "Admin"]}>
               <AdminPanelPage />
             </ProtectedRoute>
           } />
