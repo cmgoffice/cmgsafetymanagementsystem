@@ -1,6 +1,10 @@
-import React, { useState, useMemo, useRef } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { useFirestoreCollection } from "./useFirestore";
+import { seedToFirebase } from "./seedFirebase";
+import { db } from "./firebase";
+import { useAuth } from "./auth/AuthContext";
 import {
   ClipboardList,
   CheckCircle,
@@ -298,11 +302,19 @@ const INITIAL_TRAINING_SIGNINS: TrainingSignIn[] = [
 // --- MAIN APP ---
 
 export default function App() {
-  const [currentUser, setCurrentUser] = useState<User>({
-    role: ROLES.STAFF,
-    project: "J-01",
-    name: "User 01",
-  });
+  const { userProfile, logout, sessionMinutesLeft } = useAuth();
+  const navigate = useNavigate();
+
+  const initialUser = useMemo((): User => {
+    if (!userProfile) return { role: ROLES.STAFF, project: "J-01", name: "User" };
+    const roleId = userProfile.roles?.find((r) => Object.values(ROLES).some((ro) => ro.id === r)) ?? "staff";
+    const role = Object.values(ROLES).find((ro) => ro.id === roleId) ?? ROLES.STAFF;
+    const project = userProfile.assignedProjects?.[0] ?? "J-01";
+    const name = `${userProfile.firstName} ${userProfile.lastName}`.trim() || userProfile.email;
+    return { role, project, name };
+  }, [userProfile]);
+
+  const [currentUser, setCurrentUser] = useState<User>(initialUser);
 
   // Sidebar
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -340,6 +352,23 @@ export default function App() {
   const [editingTrainingSignIn, setEditingTrainingSignIn] = useState<TrainingSignIn | null>(null);
 
   const anyLoading = loadingReports || loadingProjects || loadingAudits || loadingCrane || loadingConfined || loadingSignIns;
+
+  // One-time seed mock data when DB is empty (shared for all users)
+  const hasTriedSeed = useRef(false);
+  useEffect(() => {
+    if (!db || hasTriedSeed.current || loadingProjects || projects.length > 0) return;
+    hasTriedSeed.current = true;
+    seedToFirebase({
+      projects: INITIAL_PROJECTS,
+      reports: INITIAL_REPORTS,
+      audits: INITIAL_AUDITS,
+      craneTrainees: INITIAL_CRANE_TRAINEES,
+      confinedTrainees: INITIAL_CONFINED_TRAINEES,
+      trainingSignIns: INITIAL_TRAINING_SIGNINS,
+    }).then((seeded) => {
+      if (seeded) console.log("[App] Mock data seeded to Firebase.");
+    });
+  }, [loadingProjects, projects.length]);
 
   // All project codes for dropdowns
   const projectCodes = projects.map((p) => p.projectNo);
@@ -464,6 +493,11 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-100 font-sans text-gray-800 flex flex-col">
+      {!db && (
+        <div className="bg-amber-500 text-black px-4 py-2 text-center text-sm">
+          Firebase ไม่ได้เชื่อมต่อ — กรุณาตั้งค่า .env ให้มี REACT_APP_FIREBASE_* ครบ แล้ว restart (npm start)
+        </div>
+      )}
       {/* HEADER */}
       <header className="bg-blue-900 text-white px-4 py-3 shadow-lg sticky top-0 z-20 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -493,7 +527,10 @@ export default function App() {
               setReportView("list");
             }}
           >
-            {Object.values(ROLES).map((role) => (
+            {(userProfile?.roles?.length
+              ? Object.values(ROLES).filter((ro) => userProfile.roles!.includes(ro.id as "staff" | "site_mgr" | "cm" | "cmg_mgr" | "exec"))
+              : Object.values(ROLES)
+            ).map((role) => (
               <option key={role.id} value={role.id}>{role.label}</option>
             ))}
           </select>
@@ -506,6 +543,21 @@ export default function App() {
               <option key={p} value={p}>{p}</option>
             ))}
           </select>
+          {sessionMinutesLeft > 0 && (
+            <span className="text-xs text-blue-200 hidden sm:inline">เหลือ {sessionMinutesLeft} นาที</span>
+          )}
+          {userProfile?.roles?.some((r) => r === "SuperAdmin" || r === "Admin") && (
+            <Link to="/admin" className="text-xs text-yellow-300 hover:text-white px-2 py-1 rounded hover:bg-blue-800 transition">
+              แผงผู้ดูแล
+            </Link>
+          )}
+          <button
+            type="button"
+            onClick={() => logout().then(() => navigate("/login", { replace: true }))}
+            className="text-xs text-blue-200 hover:text-white px-2 py-1 rounded hover:bg-blue-800 transition"
+          >
+            ออกจากระบบ
+          </button>
         </div>
       </header>
 

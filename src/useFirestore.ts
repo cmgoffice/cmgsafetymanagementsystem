@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import {
   collection,
-  onSnapshot,
   doc,
+  onSnapshot,
   setDoc,
   deleteDoc,
   query,
@@ -11,13 +11,23 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 
+const ROOT_COLLECTION = "CMG-Tool-Store-Management";
+const ROOT_DOC = "root";
+
 /**
- * Generic real-time Firestore collection hook.
+ * Subcollection path: CMG-Tool-Store-Management / root / {categoryName}
+ * All users (including anonymous) share the same data.
+ */
+function getSubcollectionRef(categoryName: string) {
+  if (!db) return null;
+  const rootRef = doc(db, ROOT_COLLECTION, ROOT_DOC);
+  return collection(rootRef, categoryName);
+}
+
+/**
+ * Generic real-time Firestore subcollection hook.
+ * Path: CMG-Tool-Store-Management > root > {collectionName}
  * T must have an `id` field (number or string).
- *
- * Documents are stored as:
- *   /{collectionName}/{id}
- * with all fields of T serialised to Firestore.
  */
 export function useFirestoreCollection<T extends { id: number }>(
   collectionName: string,
@@ -33,10 +43,14 @@ export function useFirestoreCollection<T extends { id: number }>(
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const q = query(
-      collection(db, collectionName),
-      orderBy(orderField, orderDir)
-    );
+    const colRef = getSubcollectionRef(collectionName);
+    if (!colRef) {
+      setItems([]);
+      setLoading(false);
+      return;
+    }
+
+    const q = query(colRef, orderBy(orderField, orderDir));
 
     const unsub = onSnapshot(
       q,
@@ -55,9 +69,14 @@ export function useFirestoreCollection<T extends { id: number }>(
   }, [collectionName, orderField, orderDir]);
 
   const saveItem = async (item: T) => {
+    if (!db) {
+      console.warn("[Firestore] db not ready");
+      return;
+    }
     try {
       const id = item.id === 0 ? Date.now() : item.id;
-      const docRef = doc(db, collectionName, String(id));
+      const rootRef = doc(db, ROOT_COLLECTION, ROOT_DOC);
+      const docRef = doc(rootRef, collectionName, String(id));
       await setDoc(docRef, { ...item, id });
     } catch (err) {
       console.error(`[Firestore] saveItem(${collectionName}):`, err);
@@ -66,8 +85,11 @@ export function useFirestoreCollection<T extends { id: number }>(
   };
 
   const deleteItem = async (id: number) => {
+    if (!db) return;
     try {
-      await deleteDoc(doc(db, collectionName, String(id)));
+      const rootRef = doc(db, ROOT_COLLECTION, ROOT_DOC);
+      const docRef = doc(rootRef, collectionName, String(id));
+      await deleteDoc(docRef);
     } catch (err) {
       console.error(`[Firestore] deleteItem(${collectionName}):`, err);
       alert(`ลบข้อมูลไม่สำเร็จ: ${(err as Error).message}`);

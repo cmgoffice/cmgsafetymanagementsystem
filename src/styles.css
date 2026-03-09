@@ -1,4 +1,8 @@
+body {
+  font-family: 'Sarabun', sans-serif;
+}
+
 .App {
-  font-family: sans-serif;
+  font-family: 'Sarabun', sans-serif;
   text-align: center;
 }
