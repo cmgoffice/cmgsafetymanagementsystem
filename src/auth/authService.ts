@@ -7,11 +7,10 @@ import {
   User as FirebaseUser,
 } from "firebase/auth";
 import { doc, getDoc, setDoc, runTransaction, serverTimestamp, Timestamp, onSnapshot } from "firebase/firestore";
-import { auth, db } from "../firebase";
+import { auth, authPersistenceReady, db } from "../firebase";
 import { APP_NAME } from "./constants";
 import type { UserRole } from "./constants";
 import type { UserProfile } from "./types";
-import { setSessionExpiry, clearSession } from "./session";
 import { logActivity } from "./activityLog";
 
 const USERS_PATH = [APP_NAME, "root", "users"] as const;
@@ -97,8 +96,8 @@ async function createUserProfile(
 
 export async function loginWithEmail(email: string, password: string): Promise<UserProfile> {
   if (!auth) throw new Error("Firebase Auth not initialized");
+  await authPersistenceReady;
   const userCred = await signInWithEmailAndPassword(auth, email, password);
-  setSessionExpiry(); // immediately, before any awaits
   const profile = await fetchProfile(userCred.user.uid);
   if (!profile) throw new Error("ไม่พบโปรไฟล์ผู้ใช้");
   logActivity("LOGIN", userCred.user.uid, { email, method: "email" });
@@ -107,9 +106,9 @@ export async function loginWithEmail(email: string, password: string): Promise<U
 
 export async function loginWithGoogle(): Promise<UserProfile> {
   if (!auth) throw new Error("Firebase Auth not initialized");
+  await authPersistenceReady;
   const provider = new GoogleAuthProvider();
   const userCred = await signInWithPopup(auth, provider);
-  setSessionExpiry(); // immediately, before any awaits
   const existing = await getDoc(userDoc(userCred.user.uid));
   let profile: UserProfile;
   if (existing.exists()) {
@@ -136,8 +135,8 @@ export async function registerWithEmail(
   position: string
 ): Promise<UserProfile> {
   if (!auth) throw new Error("Firebase Auth not initialized");
+  await authPersistenceReady;
   const userCred = await createUserWithEmailAndPassword(auth, email, password);
-  setSessionExpiry(); // immediately, before any awaits
   const profile = await createUserProfile(userCred.user, {
     firstName,
     lastName,
@@ -185,7 +184,6 @@ export function subscribeToProfile(uid: string, onProfile: (profile: UserProfile
 }
 
 export function logout(): Promise<void> {
-  clearSession();
   if (!auth) return Promise.resolve();
   return fbSignOut(auth);
 }

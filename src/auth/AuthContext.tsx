@@ -2,14 +2,12 @@ import React, { createContext, useContext, useEffect, useState, useCallback } fr
 import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "../firebase";
 import { fetchProfile, subscribeToProfile, logout as authLogout } from "./authService";
-import { getRemainingMinutes, isSessionExpired, clearSession } from "./session";
 import type { FirebaseUser, UserProfile } from "./types";
 
 export interface AuthContextValue {
   firebaseUser: FirebaseUser | null;
   userProfile: UserProfile | null;
   loading: boolean;
-  sessionMinutesLeft: number;
   refreshProfile: (uid?: string) => Promise<void>;
   /** ใส่โปรไฟล์จากผล login/register โดยตรง (แก้ race กับ onAuthStateChanged) */
   setProfileFromLogin: (profile: UserProfile) => void;
@@ -28,7 +26,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
-  const [sessionMinutesLeft, setSessionMinutesLeft] = useState(getRemainingMinutes());
 
   const setProfileFromLogin = useCallback((profile: UserProfile) => {
     setUserProfile(profile);
@@ -42,7 +39,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [firebaseUser?.uid]);
 
   const logout = useCallback(async () => {
-    clearSession();
     await authLogout();
     setFirebaseUser(null);
     setUserProfile(null);
@@ -75,26 +71,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => unsub();
   }, [firebaseUser?.uid]);
 
-  // Session expiry check every 60s; do NOT force-logout inside onAuthStateChanged
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setSessionMinutesLeft(getRemainingMinutes());
-      if (isSessionExpired() && auth?.currentUser) {
-        clearSession();
-        authLogout().then(() => {
-          setFirebaseUser(null);
-          setUserProfile(null);
-        }).catch(() => {});
-      }
-    }, 60_000);
-    return () => clearInterval(interval);
-  }, []);
-
   const value: AuthContextValue = {
     firebaseUser,
     userProfile,
     loading,
-    sessionMinutesLeft,
     refreshProfile,
     setProfileFromLogin,
     logout,

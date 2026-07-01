@@ -1,12 +1,6 @@
 /** Firestore root collection name (same as existing app) */
 export const APP_NAME = "CMG-Tool-Store-Management";
 
-/** Session localStorage key */
-export const SESSION_EXPIRY_KEY = "cmg_session_expires";
-
-/** Session duration in milliseconds (1 hour) */
-export const SESSION_DURATION_MS = 60 * 60 * 1000;
-
 /**
  * Roles: 1 user can have multiple roles.
  * MasterAdmin, SuperAdmin, Admin = เข้าหน้าจัดการ User ได้

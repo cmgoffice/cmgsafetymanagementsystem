@@ -143,6 +143,7 @@ type CraneTrainee = {
   round1?: TrainingRecord;
   round2?: TrainingRecord;
   round3?: TrainingRecord;
+  round4?: TrainingRecord;
   remark: string;
   checkDate?: string;
 };
@@ -160,9 +161,14 @@ type ConfinedSpaceTrainee = {
   lastTrainDate: string;
   institute: string;
   cer: string;
-  renewal3yr: TrainingRecord;
+  trainingHistory: TrainingRecord[];
+  round1?: TrainingRecord;
+  round2?: TrainingRecord;
+  round3?: TrainingRecord;
+  round4?: TrainingRecord;
+  renewal3yr?: TrainingRecord;
   remark: string;
-  checkDate: string;
+  checkDate?: string;
 };
 
 type TrainingSignIn = {
@@ -189,6 +195,7 @@ type TrainingSignIn = {
 
 type SidebarSection = "projects" | "daily-report" | "site-audit" | "crane-register" | "confined-space-register" | "training-signin";
 type LookupFeedback = { loading: boolean; error: string; success: string };
+type SidebarNavItem = { key: SidebarSection; label: string; icon: React.ReactNode; badgeCount?: number };
 
 function ModalShell({
   children,
@@ -473,7 +480,7 @@ function hasTrainingRecordData(record?: Partial<TrainingRecord> | null): boolean
       record.cer,
       record.remark,
       record.certificateExpireValue,
-      Array.isArray(record.cerFiles) ? record.cerFiles.length : 0,
+      Array.isArray(record.cerFiles) && record.cerFiles.length > 0 ? "has-files" : "",
     ].some((value) => (value ?? "").toString().trim() !== "")
   );
 }
@@ -560,9 +567,30 @@ async function uploadCraneCertificateFiles(
   return Promise.all(uploads);
 }
 
+async function uploadConfinedCertificateFiles(
+  files: File[],
+  userId: string,
+  traineeId: number | string,
+  recordDate: string
+): Promise<UploadedFileLink[]> {
+  const activeStorage = storage;
+  if (!activeStorage || files.length === 0) return [];
+
+  const uploads = files.map(async (file, index) => {
+    const safeName = file.name.replace(/\s+/g, "_");
+    const path = `confined-space-certificates/${userId}/${traineeId}_${recordDate || "undated"}_${Date.now()}_${index}_${safeName}`;
+    const storageRef = ref(activeStorage, path);
+    await uploadBytesResumable(storageRef, file);
+    const url = await getDownloadURL(storageRef);
+    return { name: file.name, url };
+  });
+
+  return Promise.all(uploads);
+}
+
 function getCraneTrainingHistory(trainee?: Partial<CraneTrainee> | null): TrainingRecord[] {
   const directHistory = Array.isArray(trainee?.trainingHistory) ? trainee?.trainingHistory ?? [] : [];
-  const legacyHistory = [trainee?.round1, trainee?.round2, trainee?.round3];
+  const legacyHistory = [trainee?.round1, trainee?.round2, trainee?.round3, trainee?.round4];
   const latestTrainingFallback = [
     {
       date: trainee?.lastTrainDate ?? "",
@@ -596,6 +624,51 @@ const CRANE_COURSE_OPTIONS = [
   "ผู้ยึดเกาะวัสดุ",
 ] as const;
 
+const CRANE_COURSE_COLOR_MAP: Record<
+  (typeof CRANE_COURSE_OPTIONS)[number],
+  {
+    optionIdle: string;
+    optionActive: string;
+    tableSelected: string;
+    tableEmpty: string;
+    checkSelected: string;
+    checkEmpty: string;
+  }
+> = {
+  "ผู้บังคับปั้นจั่น": {
+    optionIdle: "border-amber-200 bg-amber-50 text-amber-900 hover:border-amber-300 hover:bg-amber-100",
+    optionActive: "border-amber-400 bg-amber-200 text-amber-950 shadow-sm",
+    tableSelected: "border-amber-200 bg-amber-50 text-amber-900",
+    tableEmpty: "border-amber-100 bg-amber-50/40 text-amber-200",
+    checkSelected: "border-amber-300 bg-amber-200 text-amber-900",
+    checkEmpty: "border-amber-200 bg-white text-transparent",
+  },
+  "ผู้ควบคุมการใช้ปั้นจั่น": {
+    optionIdle: "border-sky-200 bg-sky-50 text-sky-900 hover:border-sky-300 hover:bg-sky-100",
+    optionActive: "border-sky-400 bg-sky-200 text-sky-950 shadow-sm",
+    tableSelected: "border-sky-200 bg-sky-50 text-sky-900",
+    tableEmpty: "border-sky-100 bg-sky-50/40 text-sky-200",
+    checkSelected: "border-sky-300 bg-sky-200 text-sky-900",
+    checkEmpty: "border-sky-200 bg-white text-transparent",
+  },
+  "ผู้ให้สัญญาณแก่ผู้บังคับปั้นจั่น": {
+    optionIdle: "border-emerald-200 bg-emerald-50 text-emerald-900 hover:border-emerald-300 hover:bg-emerald-100",
+    optionActive: "border-emerald-400 bg-emerald-200 text-emerald-950 shadow-sm",
+    tableSelected: "border-emerald-200 bg-emerald-50 text-emerald-900",
+    tableEmpty: "border-emerald-100 bg-emerald-50/40 text-emerald-200",
+    checkSelected: "border-emerald-300 bg-emerald-200 text-emerald-900",
+    checkEmpty: "border-emerald-200 bg-white text-transparent",
+  },
+  "ผู้ยึดเกาะวัสดุ": {
+    optionIdle: "border-rose-200 bg-rose-50 text-rose-900 hover:border-rose-300 hover:bg-rose-100",
+    optionActive: "border-rose-400 bg-rose-200 text-rose-950 shadow-sm",
+    tableSelected: "border-rose-200 bg-rose-50 text-rose-900",
+    tableEmpty: "border-rose-100 bg-rose-50/40 text-rose-200",
+    checkSelected: "border-rose-300 bg-rose-200 text-rose-900",
+    checkEmpty: "border-rose-200 bg-white text-transparent",
+  },
+};
+
 function normalizeCraneCourseSelections(course: string): string[] {
   const legacyCourseMap: Record<string, (typeof CRANE_COURSE_OPTIONS)[number]> = {
     "Crane Operator": "ผู้บังคับปั้นจั่น",
@@ -618,31 +691,67 @@ function formatCraneCourseSelections(selections: string[]): string {
 }
 
 function getCraneCourseOptionClasses(course: string, selected: boolean): string {
-  const palette: Record<string, { idle: string; active: string }> = {
-    "ผู้บังคับปั้นจั่น": {
-      idle: "border-amber-200 bg-amber-50 text-amber-900 hover:border-amber-300 hover:bg-amber-100",
-      active: "border-amber-400 bg-amber-200 text-amber-950 shadow-sm",
-    },
-    "ผู้ควบคุมการใช้ปั้นจั่น": {
-      idle: "border-sky-200 bg-sky-50 text-sky-900 hover:border-sky-300 hover:bg-sky-100",
-      active: "border-sky-400 bg-sky-200 text-sky-950 shadow-sm",
-    },
-    "ผู้ให้สัญญาณแก่ผู้บังคับปั้นจั่น": {
-      idle: "border-emerald-200 bg-emerald-50 text-emerald-900 hover:border-emerald-300 hover:bg-emerald-100",
-      active: "border-emerald-400 bg-emerald-200 text-emerald-950 shadow-sm",
-    },
-    "ผู้ยึดเกาะวัสดุ": {
-      idle: "border-rose-200 bg-rose-50 text-rose-900 hover:border-rose-300 hover:bg-rose-100",
-      active: "border-rose-400 bg-rose-200 text-rose-950 shadow-sm",
-    },
+  const colors = CRANE_COURSE_COLOR_MAP[course as (typeof CRANE_COURSE_OPTIONS)[number]] ?? {
+    optionIdle: "border-gray-200 bg-white text-gray-700 hover:border-yellow-300 hover:bg-yellow-50",
+    optionActive: "border-yellow-400 bg-yellow-100 text-yellow-900 shadow-sm",
   };
 
-  const colors = palette[course] ?? {
-    idle: "border-gray-200 bg-white text-gray-700 hover:border-yellow-300 hover:bg-yellow-50",
-    active: "border-yellow-400 bg-yellow-100 text-yellow-900 shadow-sm",
-  };
+  return selected ? colors.optionActive : colors.optionIdle;
+}
 
-  return selected ? colors.active : colors.idle;
+function getCraneCourseTableClasses(course: (typeof CRANE_COURSE_OPTIONS)[number], selected: boolean) {
+  const colors = CRANE_COURSE_COLOR_MAP[course];
+
+  return {
+    wrapper: selected ? colors.tableSelected : colors.tableEmpty,
+    check: selected ? colors.checkSelected : colors.checkEmpty,
+  };
+}
+
+function getCraneTableColumnClasses(column: { courseOption?: (typeof CRANE_COURSE_OPTIONS)[number] }) {
+  return column.courseOption ? "w-24 min-w-[6rem]" : "";
+}
+
+function getCraneStatusDotClasses(status: string) {
+  if (status === "ปฏิบัติงาน") {
+    return "border-green-200 bg-green-500";
+  }
+
+  if (status === "พ้นสภาพ" || status === "ลาออก") {
+    return "border-red-200 bg-red-500";
+  }
+
+  return "border-slate-200 bg-slate-400";
+}
+
+function getCraneExpireDateCell(record?: Partial<TrainingRecord> | null): { label: string; classes: string } {
+  const remainingDays = getTrainingRemainingDays(record);
+
+  if (remainingDays === null) {
+    return {
+      label: "-",
+      classes: "border-slate-200 bg-slate-50 text-slate-400",
+    };
+  }
+
+  if (remainingDays < 0) {
+    return {
+      label: `หมด ${Math.abs(remainingDays)} วัน`,
+      classes: "border-red-200 bg-red-50 text-red-700",
+    };
+  }
+
+  if (remainingDays <= 30) {
+    return {
+      label: `เหลือ ${remainingDays} วัน`,
+      classes: "border-amber-200 bg-amber-50 text-amber-700",
+    };
+  }
+
+  return {
+    label: `เหลือ ${remainingDays} วัน`,
+    classes: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  };
 }
 
 const INITIAL_CRANE_TRAINEES: CraneTrainee[] = [
@@ -656,6 +765,7 @@ const INITIAL_CRANE_TRAINEES: CraneTrainee[] = [
     round1: { date: "2021-05-15", institute: "Direction Training", cer: "CR-001-1", cerFiles: [], certificateExpireValue: "365", certificateExpireUnit: "day", remark: "" },
     round2: { date: "2023-05-15", institute: "Direction Training", cer: "CR-001-2", cerFiles: [], certificateExpireValue: "1", certificateExpireUnit: "year", remark: "" },
     round3: createEmptyTrainingRecord(),
+    round4: createEmptyTrainingRecord(),
     remark: "", checkDate: "2024-01-10",
   },
 ];
@@ -663,8 +773,16 @@ const INITIAL_CRANE_TRAINEES: CraneTrainee[] = [
 const INITIAL_CONFINED_TRAINEES: ConfinedSpaceTrainee[] = [
   {
     id: 1, fullName: "นายวิชัย สุขใจ", company: "บริษัท โครงสร้างเหล็ก", position: "Supervisor", type: "ทำงานอยู่", status: "ปฏิบัติงาน",
-    project: "J-02", course: "Confined Space Safety", lastTrainDate: "2022-11-05", institute: "Direction Training", cer: "CS-001",
-    renewal3yr: { date: "2025-11-05", institute: "", cer: "", cerFiles: [], certificateExpireValue: "", certificateExpireUnit: "day", remark: "" },
+    project: "J-02", course: "ผู้ควบคุม, ผู้ช่วยเหลือ", lastTrainDate: "2025-11-05", institute: "Direction Training", cer: "CS-001-2",
+    trainingHistory: [
+      { date: "2022-11-05", institute: "Direction Training", cer: "CS-001-1", cerFiles: [], certificateExpireValue: "3", certificateExpireUnit: "year", remark: "" },
+      { date: "2025-11-05", institute: "Direction Training", cer: "CS-001-2", cerFiles: [], certificateExpireValue: "3", certificateExpireUnit: "year", remark: "" },
+    ],
+    round1: { date: "2022-11-05", institute: "Direction Training", cer: "CS-001-1", cerFiles: [], certificateExpireValue: "3", certificateExpireUnit: "year", remark: "" },
+    round2: { date: "2025-11-05", institute: "Direction Training", cer: "CS-001-2", cerFiles: [], certificateExpireValue: "3", certificateExpireUnit: "year", remark: "" },
+    round3: createEmptyTrainingRecord(),
+    round4: createEmptyTrainingRecord(),
+    renewal3yr: createEmptyTrainingRecord(),
     remark: "", checkDate: "2024-01-10",
   },
 ];
@@ -682,7 +800,7 @@ const INITIAL_TRAINING_SIGNINS: TrainingSignIn[] = [
 // --- MAIN APP ---
 
 export default function App() {
-  const { userProfile, logout, sessionMinutesLeft } = useAuth();
+  const { userProfile, logout } = useAuth();
   const navigate = useNavigate();
 
   // บทบาทที่ฝังใน User (จากแอดมิน) — มีสิทธิ์บทบาทใดก็ใช้ได้เลย ไม่ต้องเลือกสลับ
@@ -707,8 +825,8 @@ export default function App() {
 
   // Daily Report state — Firestore
   const { items: reports, loading: loadingReports, saveItem: saveReport, deleteItem: deleteReportFS } = useFirestoreCollection<Report>("reports", "id", "desc");
-  const [reportView, setReportView] = useState<"list" | "create" | "detail">("list");
-  const [selectedReport, setSelectedReport] = useState<Report | null>(null);
+  const [reportView, setReportView] = useState<"list" | "create">("list");
+  const [selectedReportId, setSelectedReportId] = useState<number | null>(null);
 
   // Projects state — Firestore
   const { items: projects, loading: loadingProjects, saveItem: saveProjectFS, deleteItem: deleteProjectFS } = useFirestoreCollection<Project>("projects", "id", "asc");
@@ -780,8 +898,55 @@ export default function App() {
         if (workflowRoles.includes("exec") && r.status === "APPROVED") return true;
         return false;
       })
-      .sort((a, b) => b.id - a.id);
+      .sort((a, b) => {
+        const dateCompare = b.date.localeCompare(a.date);
+        if (dateCompare !== 0) return dateCompare;
+        return b.id - a.id;
+      });
   }, [reports, workflowRoles, allowedProjectCodes]);
+
+  const dailyReportActionCount = useMemo(() => {
+    let count = 0;
+
+    for (const report of reports) {
+      if (
+        workflowRoles.includes("site_mgr") &&
+        allowedProjectCodes.includes(report.project) &&
+        report.status === "PENDING_SITE_MGR"
+      ) {
+        count += 1;
+        continue;
+      }
+
+      if (
+        workflowRoles.includes("cm") &&
+        allowedProjectCodes.includes(report.project) &&
+        report.status === "PENDING_CM"
+      ) {
+        count += 1;
+        continue;
+      }
+
+      if (workflowRoles.includes("cmg_mgr") && report.status === "PENDING_CMG_MGR") {
+        count += 1;
+        continue;
+      }
+
+      if (
+        workflowRoles.includes("exec") &&
+        report.status === "APPROVED" &&
+        !report.acknowledgedByExecs.includes(currentUser.name)
+      ) {
+        count += 1;
+      }
+    }
+
+    return count;
+  }, [reports, workflowRoles, allowedProjectCodes, currentUser.name]);
+  const selectedReport = useMemo(
+    () => reports.find((report) => report.id === selectedReportId) ?? null,
+    [reports, selectedReportId]
+  );
 
   const handleCreateReport = async (newReport: Omit<Report, "id" | "project" | "staffName" | "status" | "history" | "acknowledgedByExecs" | "docNo">) => {
     const report: Report = {
@@ -878,9 +1043,9 @@ export default function App() {
     }
   };
 
-  const navItems: { key: SidebarSection; label: string; icon: React.ReactNode }[] = [
+  const navItems: SidebarNavItem[] = [
     { key: "projects", label: "โครงการ / Projects", icon: <Building2 size={18} /> },
-    { key: "daily-report", label: "Daily Report", icon: <ClipboardList size={18} /> },
+    { key: "daily-report", label: "Daily Report", icon: <ClipboardList size={18} />, badgeCount: dailyReportActionCount },
     { key: "site-audit", label: "Site Audit Report", icon: <ShieldCheck size={18} /> },
     { key: "crane-register", label: "ทะเบียนผู้อบรมปั้นจั่น", icon: <HardHat size={18} /> },
     { key: "confined-space-register", label: "ทะเบียนผู้อบรมที่อับอากาศ", icon: <Wind size={18} /> },
@@ -934,9 +1099,6 @@ export default function App() {
               )}
             </div>
           </div>
-          {sessionMinutesLeft > 0 && (
-            <span className="text-xs text-blue-200 hidden sm:inline">เหลือ {sessionMinutesLeft} นาที</span>
-          )}
           <button
             type="button"
             onClick={() => logout().then(() => navigate("/login", { replace: true }))}
@@ -971,7 +1133,18 @@ export default function App() {
                 }`}
               >
                 {item.icon}
-                {item.label}
+                <span className="flex-1 text-left">{item.label}</span>
+                {item.badgeCount ? (
+                  <span
+                    className={`min-w-[1.5rem] h-6 px-1.5 rounded-full flex items-center justify-center text-xs font-bold ${
+                      activeSection === item.key
+                        ? "bg-white/20 text-white"
+                        : "bg-red-500 text-white"
+                    }`}
+                  >
+                    {item.badgeCount}
+                  </span>
+                ) : null}
               </button>
             ))}
             {isAdmin && (
@@ -1008,6 +1181,7 @@ export default function App() {
             </div>
           )}
 
+          <div className="mx-auto w-full max-w-[1320px]">
           {/* ===== PROJECTS SECTION ===== */}
           {activeSection === "projects" && (
             <>
@@ -1037,7 +1211,7 @@ export default function App() {
                   reports={filteredReports}
                   currentUser={currentUser}
                   hasWorkflowRole={hasWorkflowRole}
-                  onSelectReport={(r) => { setSelectedReport(r); setReportView("detail"); }}
+                  onSelectReport={(r) => setSelectedReportId(r.id)}
                   onCreateReport={() => setReportView("create")}
                 />
               )}
@@ -1047,15 +1221,17 @@ export default function App() {
                   onSubmit={handleCreateReport}
                 />
               )}
-              {reportView === "detail" && selectedReport && (
-                <ReportDetail
-                  report={selectedReport}
-                  currentUser={currentUser}
-                  hasWorkflowRole={hasWorkflowRole}
-                  onBack={() => { setSelectedReport(null); setReportView("list"); }}
-                  onUpdateStatus={updateStatus}
-                  onMarkSeen={markAsSeen}
-                />
+              {selectedReport && (
+                <ModalShell onClose={() => setSelectedReportId(null)}>
+                  <ReportDetail
+                    report={selectedReport}
+                    currentUser={currentUser}
+                    hasWorkflowRole={hasWorkflowRole}
+                    onBack={() => setSelectedReportId(null)}
+                    onUpdateStatus={updateStatus}
+                    onMarkSeen={markAsSeen}
+                  />
+                </ModalShell>
               )}
             </>
           )}
@@ -1148,16 +1324,19 @@ export default function App() {
                 />
               )}
               {confinedView === "form" && (
-                <ConfinedSpaceTraineeForm
-                  trainee={editingConfined}
-                  projectCodes={projectCodes}
-                  onCancel={() => { setConfinedView("list"); setEditingConfined(null); }}
-                  onSave={handleSaveConfined}
-                />
+                <ModalShell onClose={() => { setConfinedView("list"); setEditingConfined(null); }}>
+                  <ConfinedSpaceTraineeForm
+                    trainee={editingConfined}
+                    projectCodes={projectCodes}
+                    onCancel={() => { setConfinedView("list"); setEditingConfined(null); }}
+                    onSave={handleSaveConfined}
+                  />
+                </ModalShell>
               )}
             </>
           )}
 
+          </div>
         </main>
       </div>
     </div>
@@ -1773,25 +1952,24 @@ function rowToCrane(row: Record<string, string>, id: number): CraneTrainee {
     round1: trainingHistory[0] || createEmptyTrainingRecord(),
     round2: trainingHistory[1] || createEmptyTrainingRecord(),
     round3: trainingHistory[2] || createEmptyTrainingRecord(),
+    round4: trainingHistory[3] || createEmptyTrainingRecord(),
     remark: row["หมายเหตุ"] || "", checkDate: row["วันที่เช็ค"] || "",
   }, trainingHistory);
 }
 
-const CRANE_TABLE_COLUMNS: { key: string; label: string }[] = [
+const CRANE_TABLE_COLUMNS: { key: string; label: string; courseOption?: (typeof CRANE_COURSE_OPTIONS)[number] }[] = [
   { key: "fullName", label: "ชื่อ-สกุล" },
   { key: "company", label: "ต้นสังกัด" },
   { key: "position", label: "ตำแหน่ง" },
   { key: "type", label: "ประเภทปั้นจั่น" },
   { key: "status", label: "สถานะ" },
   { key: "project", label: "โครงการ" },
-  { key: "lastTrainDate", label: "วันที่อบรมล่าสุด" },
-  { key: "institute", label: "สถาบัน" },
-  { key: "cer", label: "CER." },
-  { key: "round1", label: "ครั้งที่ 1 (วันที่)" },
-  { key: "round2", label: "ครั้งที่ 2 (วันที่)" },
-  { key: "round3", label: "ครั้งที่ 3 (วันที่)" },
-  { key: "remark", label: "หมายเหตุ" },
-  { key: "checkDate", label: "วันที่เช็ค" },
+  { key: "courseOperator", label: "ผู้บังคับปั้นจั่น", courseOption: "ผู้บังคับปั้นจั่น" },
+  { key: "courseController", label: "ผู้ควบคุมการใช้ปั้นจั่น", courseOption: "ผู้ควบคุมการใช้ปั้นจั่น" },
+  { key: "courseSignalPerson", label: "ผู้ให้สัญญาณแก่ผู้บังคับปั้นจั่น", courseOption: "ผู้ให้สัญญาณแก่ผู้บังคับปั้นจั่น" },
+  { key: "courseRigger", label: "ผู้ยึดเกาะวัสดุ", courseOption: "ผู้ยึดเกาะวัสดุ" },
+  { key: "trainingCount", label: "จำนวนครั้ง" },
+  { key: "expireDate", label: "Expire Date" },
 ];
 
 function CraneRegisterList({
@@ -1809,6 +1987,7 @@ function CraneRegisterList({
 }) {
   const [search, setSearch] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+  const [selectedTrainee, setSelectedTrainee] = useState<CraneTrainee | null>(null);
   const [visibleColumns, setVisibleColumns] = useState<Record<string, boolean>>(() =>
     CRANE_TABLE_COLUMNS.reduce((acc, c) => ({ ...acc, [c.key]: true }), {})
   );
@@ -1939,47 +2118,73 @@ function CraneRegisterList({
               <tr className="bg-yellow-500 text-white text-xs">
                 <th className="px-3 py-2 text-left font-semibold">#</th>
                 {CRANE_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((c) => (
-                  <th key={c.key} className="px-3 py-2 text-left font-semibold">{c.label}</th>
+                  <th key={c.key} className={`px-3 py-2 text-left font-semibold ${getCraneTableColumnClasses(c)}`}>{c.label}</th>
                 ))}
-                <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody>
               {filtered.map((t, idx) => (
                 (() => {
-                  const round1 = getCraneTrainingRound(t, 0);
-                  const round2 = getCraneTrainingRound(t, 1);
-                  const round3 = getCraneTrainingRound(t, 2);
+                  const trainingHistory = getCraneTrainingHistory(t);
+                  const selectedCourses = normalizeCraneCourseSelections(t.course);
+                  const trainingCount = trainingHistory.length;
+                  const latestTrainingRecord = trainingHistory[trainingHistory.length - 1];
+                  const expireDateCell = getCraneExpireDateCell(latestTrainingRecord);
 
                   return (
-                    <tr key={t.id} className={idx % 2 === 0 ? "bg-yellow-50" : "bg-white"}>
+                    <tr
+                      key={t.id}
+                      className={`${idx % 2 === 0 ? "bg-yellow-50" : "bg-white"} cursor-pointer transition hover:bg-yellow-100/80`}
+                      onClick={() => setSelectedTrainee(t)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setSelectedTrainee(t);
+                        }
+                      }}
+                      tabIndex={0}
+                    >
                       <td className="px-3 py-2 text-gray-500">{idx + 1}</td>
                       {CRANE_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((col) => (
-                        <td key={col.key} className="px-3 py-2 text-gray-600 whitespace-nowrap">
+                        <td key={col.key} className={`px-3 py-2 text-gray-600 whitespace-nowrap ${getCraneTableColumnClasses(col)}`}>
+                          {col.courseOption && (() => {
+                            const isSelected = selectedCourses.includes(col.courseOption!);
+                            const courseClasses = getCraneCourseTableClasses(col.courseOption!, isSelected);
+
+                            return (
+                              <span className={`inline-flex items-center justify-center rounded-lg border px-2 py-1.5 ${courseClasses.wrapper}`}>
+                                <span className={`inline-flex h-4 w-4 items-center justify-center rounded border ${courseClasses.check}`}>
+                                  <CheckCircle size={11} />
+                                </span>
+                              </span>
+                            );
+                          })()}
                           {col.key === "fullName" && <span className="font-medium text-gray-800">{t.fullName}</span>}
                           {col.key === "company" && t.company}
                           {col.key === "position" && t.position}
                           {col.key === "type" && t.type}
                           {col.key === "status" && (
-                            <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 border border-green-200">{t.status}</span>
+                            <span
+                              className="inline-flex w-full items-center justify-center"
+                              title={t.status}
+                              aria-label={t.status}
+                            >
+                              <span className={`inline-flex h-3.5 w-3.5 rounded-full border ${getCraneStatusDotClasses(t.status)}`} />
+                            </span>
                           )}
                           {col.key === "project" && t.project}
-                          {col.key === "lastTrainDate" && t.lastTrainDate}
-                          {col.key === "institute" && t.institute}
-                          {col.key === "cer" && t.cer}
-                          {col.key === "round1" && (round1.date || "-")}
-                          {col.key === "round2" && (round2.date || "-")}
-                          {col.key === "round3" && (round3.date || "-")}
-                          {col.key === "remark" && t.remark}
-                          {col.key === "checkDate" && t.checkDate}
+                          {col.key === "trainingCount" && (
+                            <span className="inline-flex min-w-[44px] items-center justify-center rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 font-semibold text-slate-700">
+                              {trainingCount}
+                            </span>
+                          )}
+                          {col.key === "expireDate" && (
+                            <span className={`inline-flex min-w-[92px] items-center justify-center rounded-lg border px-2.5 py-1 text-xs font-semibold ${expireDateCell.classes}`}>
+                              {expireDateCell.label}
+                            </span>
+                          )}
                         </td>
                       ))}
-                      <td className="px-3 py-2">
-                        <div className="flex gap-1">
-                          <button onClick={() => onEdit(t)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition" title="แก้ไข"><Pencil size={14} /></button>
-                          <button onClick={() => onDelete(t.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded transition" title="ลบ"><Trash2 size={14} /></button>
-                        </div>
-                      </td>
                     </tr>
                   );
                 })()
@@ -1988,7 +2193,207 @@ function CraneRegisterList({
           </table>
         </div>
       )}
+
+      {selectedTrainee && (
+        <CraneTraineeDetailModal
+          trainee={selectedTrainee}
+          onClose={() => setSelectedTrainee(null)}
+          onEdit={(trainee) => {
+            setSelectedTrainee(null);
+            onEdit(trainee);
+          }}
+          onDelete={(id) => {
+            setSelectedTrainee(null);
+            onDelete(id);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+function CraneTraineeDetailModal({
+  trainee,
+  onClose,
+  onEdit,
+  onDelete,
+}: {
+  trainee: CraneTrainee;
+  onClose: () => void;
+  onEdit: (trainee: CraneTrainee) => void;
+  onDelete: (id: number) => void;
+}) {
+  const selectedCourses = normalizeCraneCourseSelections(trainee.course);
+  const trainingHistory = getCraneTrainingHistory(trainee);
+
+  const infoItems = [
+    { label: "รหัสพนักงาน", value: trainee.employeeCode || "-" },
+    { label: "ชื่อ-สกุล", value: trainee.fullName || "-" },
+    { label: "ต้นสังกัด", value: trainee.company || "-" },
+    { label: "ตำแหน่ง", value: trainee.position || "-" },
+    { label: "ประเภทปั้นจั่น", value: trainee.type || "-" },
+    { label: "สถานะ", value: trainee.status || "-" },
+    { label: "โครงการ", value: trainee.project || "-" },
+    { label: "จำนวนครั้งอบรม", value: String(trainingHistory.length) },
+  ];
+
+  return (
+    <ModalShell onClose={onClose}>
+      <div className="mx-auto flex max-h-[calc(100vh-2rem)] max-w-4xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between gap-4 border-b border-yellow-100 bg-yellow-50 p-5">
+          <div>
+            <h3 className="flex items-center gap-2 text-xl font-bold text-slate-900">
+              <HardHat size={20} className="text-yellow-600" />
+              รายละเอียดผู้เข้าอบรมปั้นจั่น
+            </h3>
+            <p className="mt-1 text-sm text-slate-500">{trainee.fullName || "-"}</p>
+          </div>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-700"><X size={20} /></button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-6">
+          <div className="space-y-6">
+          <section className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+            <h4 className="text-sm font-bold text-slate-800">ข้อมูลทั่วไป</h4>
+            <div className="mt-2.5 grid grid-cols-1 gap-2.5 md:grid-cols-2">
+              {infoItems.map((item) => (
+                <div key={item.label} className="rounded-lg border border-white bg-white px-3 py-2.5 shadow-sm">
+                  <div className="text-[11px] font-medium text-slate-500">{item.label}</div>
+                  <div className="mt-0.5 text-xs font-semibold text-slate-900">{item.value}</div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-5">
+            <h4 className="text-sm font-bold text-slate-800">บทบาทที่อบรม</h4>
+            <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+              {CRANE_COURSE_OPTIONS.map((course) => {
+                const isSelected = selectedCourses.includes(course);
+                const courseClasses = getCraneCourseTableClasses(course, isSelected);
+
+                return (
+                  <div key={course} className={`rounded-xl border p-3 ${courseClasses.wrapper}`}>
+                    <div className="flex items-center gap-2">
+                      <span className={`inline-flex h-4 w-4 items-center justify-center rounded border ${courseClasses.check}`}>
+                        <CheckCircle size={11} />
+                      </span>
+                      <span className="text-xs font-semibold leading-tight">{course}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-5">
+            <div className="flex items-center justify-between gap-3">
+              <h4 className="text-sm font-bold text-slate-800">ประวัติการอบรม</h4>
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">
+                ทั้งหมด {trainingHistory.length} ครั้ง
+              </span>
+            </div>
+
+            {trainingHistory.length === 0 ? (
+              <div className="mt-3 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-center text-xs text-slate-400">
+                ยังไม่มีประวัติการอบรม
+              </div>
+            ) : (
+              <div className="mt-3 space-y-2.5">
+                {trainingHistory.map((record, index) => {
+                  const expiryStatus = getTrainingExpiryStatus(record);
+                  const expiryDate = getTrainingExpiryDate(record);
+
+                  return (
+                    <div key={`${record.date}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <div className="text-xs font-bold text-slate-900">ครั้งที่ {index + 1}</div>
+                          <div className="mt-0.5 text-[11px] text-slate-500">{formatDateLabel(record.date)}</div>
+                        </div>
+                        {expiryStatus && (
+                          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${expiryStatus.tone}`}>
+                            {expiryStatus.label}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+                        <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
+                          <div className="text-[10px] font-medium text-slate-500">สถาบัน</div>
+                          <div className="mt-0.5 text-xs text-slate-900">{record.institute || "-"}</div>
+                        </div>
+                        <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
+                          <div className="text-[10px] font-medium text-slate-500">CER.</div>
+                          <div className="mt-0.5 text-xs text-slate-900">{formatCerSummary(record) || "-"}</div>
+                        </div>
+                        <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
+                          <div className="text-[10px] font-medium text-slate-500">วันหมดอายุ</div>
+                          <div className="mt-0.5 text-xs text-slate-900">{formatDateLabel(expiryDate) || "-"}</div>
+                        </div>
+                        <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
+                          <div className="text-[10px] font-medium text-slate-500">ไฟล์ CER</div>
+                          <div className="mt-1.5 flex flex-wrap gap-1.5">
+                            {record.cerFiles.length > 0 ? record.cerFiles.map((file, fileIndex) => (
+                              <a
+                                key={`${file.url}-${fileIndex}`}
+                                href={file.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex rounded-md border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700 hover:bg-sky-100"
+                              >
+                                {file.name || `ไฟล์ ${fileIndex + 1}`}
+                              </a>
+                            )) : <span className="text-xs text-slate-400">-</span>}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
+                          <div className="text-[10px] font-medium text-slate-500">หมายเหตุ</div>
+                          <div className="mt-0.5 text-xs text-slate-900">{record.remark || "-"}</div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-slate-50 px-6 py-4">
+          <button
+            type="button"
+            onClick={() => {
+              if (window.confirm(`ต้องการลบรายการ ${trainee.fullName || ""} ใช่หรือไม่?`)) {
+                onDelete(trainee.id);
+              }
+            }}
+            className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-white px-4 py-2 text-sm font-medium text-red-600 transition hover:bg-red-50"
+          >
+            <Trash2 size={15} />
+            ลบรายการ
+          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+            >
+              ปิด
+            </button>
+            <button
+              type="button"
+              onClick={() => onEdit(trainee)}
+              className="inline-flex items-center gap-2 rounded-lg bg-yellow-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-yellow-600"
+            >
+              <Pencil size={15} />
+              แก้ไขรายการ
+            </button>
+          </div>
+        </div>
+      </div>
+    </ModalShell>
   );
 }
 
@@ -2000,6 +2405,7 @@ const EMPTY_CRANE_TRAINEE: CraneTrainee = {
   round1: createEmptyTrainingRecord(),
   round2: createEmptyTrainingRecord(),
   round3: createEmptyTrainingRecord(),
+  round4: createEmptyTrainingRecord(),
   remark: "", checkDate: "",
 };
 function syncCraneTrainingHistory(trainee: CraneTrainee, history: TrainingRecord[]): CraneTrainee {
@@ -2018,6 +2424,7 @@ function syncCraneTrainingHistory(trainee: CraneTrainee, history: TrainingRecord
     round1: normalizedHistory[0] ?? createEmptyTrainingRecord(),
     round2: normalizedHistory[1] ?? createEmptyTrainingRecord(),
     round3: normalizedHistory[2] ?? createEmptyTrainingRecord(),
+    round4: normalizedHistory[3] ?? createEmptyTrainingRecord(),
   };
 }
 
@@ -2337,6 +2744,10 @@ function CraneTraineeForm({
     closeHistoryModal();
   };
 
+  const handleDeleteHistory = (index: number) => {
+    updateTrainingHistory((history) => history.slice(0, index));
+  };
+
   const handleSave = () => {
     if (!employeeCode.trim() || !form.fullName.trim()) {
       alert("กรุณากรอกรหัสพนักงานและกด Check ก่อนบันทึก");
@@ -2463,7 +2874,7 @@ function CraneTraineeForm({
                         <button type="button" onClick={() => openHistoryModal(index)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition" title="แก้ไข"><Pencil size={14} /></button>
                         <button
                           type="button"
-                          onClick={() => updateTrainingHistory((history) => history.filter((_, itemIndex) => itemIndex !== index))}
+                          onClick={() => handleDeleteHistory(index)}
                           className="p-1.5 text-red-500 hover:bg-red-50 rounded transition"
                           title="ลบ"
                         >
@@ -2511,7 +2922,7 @@ function CraneTraineeForm({
 
       {historyModalState.open && (
         <CraneTrainingHistoryModal
-          title={historyModalState.index === null ? "เพิ่มประวัติการอบรม" : `แก้ไขประวัติการอบรม ครั้งที่ ${historyModalState.index + 1}`}
+          title={historyModalState.index === null ? "เพิ่มประวัติการอบรม" : "แก้ไขประวัติการอบรม"}
           record={modalRecord}
           traineeKey={form.employeeCode || String(form.id || "new")}
           onClose={closeHistoryModal}
@@ -2526,60 +2937,322 @@ function CraneTraineeForm({
 // CONFINED SPACE REGISTER COMPONENTS
 // ============================================================
 
-const CONFINED_COLUMNS = [
+const CONFINED_BASE_COLUMNS = [
   "ชื่อ-สกุล", "ต้นสังกัด", "ตำแหน่ง", "ประเภท", "สถานะ", "โครงการ", "หลักสูตร",
   "วันที่อบรมล่าสุด", "สถาบันอบรม", "CER.",
-  "ครบรอบ3ปี_วันที่", "ครบรอบ3ปี_สถาบัน", "ครบรอบ3ปี_CER",
+];
+
+const CONFINED_TRAILING_COLUMNS = [
   "หมายเหตุ", "วันที่เช็ค",
 ];
 
-const CONFINED_TABLE_COLUMNS: { key: string; label: string }[] = [
+function getConfinedHistoryColumns(historyCount: number): string[] {
+  return Array.from({ length: Math.max(1, historyCount) }, (_, index) => {
+    const round = index + 1;
+    return [
+      `อบรมครั้งที่${round}_วันที่`,
+      `อบรมครั้งที่${round}_สถาบัน`,
+      `อบรมครั้งที่${round}_CER`,
+      `อบรมครั้งที่${round}_CERไฟล์`,
+      `อบรมครั้งที่${round}_CertificateExpire`,
+      `อบรมครั้งที่${round}_CertificateExpireUnit`,
+      `อบรมครั้งที่${round}_วันหมดอายุ`,
+      `อบรมครั้งที่${round}_คงเหลือวัน`,
+      `อบรมครั้งที่${round}_หมายเหตุ`,
+    ];
+  }).flat();
+}
+
+function getConfinedExportColumns(historyCount: number): string[] {
+  return [...CONFINED_BASE_COLUMNS, ...getConfinedHistoryColumns(historyCount), ...CONFINED_TRAILING_COLUMNS];
+}
+
+const CONFINED_COURSE_OPTIONS = [
+  "ผู้อนุญาต",
+  "ผู้ควบคุม",
+  "ผู้ช่วยเหลือ",
+  "ผู้ปฏิบัติงาน",
+] as const;
+
+const CONFINED_COURSE_COLOR_MAP: Record<
+  (typeof CONFINED_COURSE_OPTIONS)[number],
+  {
+    optionIdle: string;
+    optionActive: string;
+    tableSelected: string;
+    tableEmpty: string;
+    checkSelected: string;
+    checkEmpty: string;
+  }
+> = {
+  "ผู้อนุญาต": {
+    optionIdle: "border-cyan-200 bg-cyan-50 text-cyan-900 hover:border-cyan-300 hover:bg-cyan-100",
+    optionActive: "border-cyan-400 bg-cyan-200 text-cyan-950 shadow-sm",
+    tableSelected: "border-cyan-200 bg-cyan-50 text-cyan-900",
+    tableEmpty: "border-cyan-100 bg-cyan-50/40 text-cyan-200",
+    checkSelected: "border-cyan-300 bg-cyan-200 text-cyan-900",
+    checkEmpty: "border-cyan-200 bg-white text-transparent",
+  },
+  "ผู้ควบคุม": {
+    optionIdle: "border-teal-200 bg-teal-50 text-teal-900 hover:border-teal-300 hover:bg-teal-100",
+    optionActive: "border-teal-400 bg-teal-200 text-teal-950 shadow-sm",
+    tableSelected: "border-teal-200 bg-teal-50 text-teal-900",
+    tableEmpty: "border-teal-100 bg-teal-50/40 text-teal-200",
+    checkSelected: "border-teal-300 bg-teal-200 text-teal-900",
+    checkEmpty: "border-teal-200 bg-white text-transparent",
+  },
+  "ผู้ช่วยเหลือ": {
+    optionIdle: "border-emerald-200 bg-emerald-50 text-emerald-900 hover:border-emerald-300 hover:bg-emerald-100",
+    optionActive: "border-emerald-400 bg-emerald-200 text-emerald-950 shadow-sm",
+    tableSelected: "border-emerald-200 bg-emerald-50 text-emerald-900",
+    tableEmpty: "border-emerald-100 bg-emerald-50/40 text-emerald-200",
+    checkSelected: "border-emerald-300 bg-emerald-200 text-emerald-900",
+    checkEmpty: "border-emerald-200 bg-white text-transparent",
+  },
+  "ผู้ปฏิบัติงาน": {
+    optionIdle: "border-blue-200 bg-blue-50 text-blue-900 hover:border-blue-300 hover:bg-blue-100",
+    optionActive: "border-blue-400 bg-blue-200 text-blue-950 shadow-sm",
+    tableSelected: "border-blue-200 bg-blue-50 text-blue-900",
+    tableEmpty: "border-blue-100 bg-blue-50/40 text-blue-200",
+    checkSelected: "border-blue-300 bg-blue-200 text-blue-900",
+    checkEmpty: "border-blue-200 bg-white text-transparent",
+  },
+};
+
+function normalizeConfinedCourseSelections(course: string): string[] {
+  const legacyCourseMap: Record<string, (typeof CONFINED_COURSE_OPTIONS)[number]> = {
+    "Confined Space Safety": "ผู้ปฏิบัติงาน",
+  };
+
+  const normalized = course
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => legacyCourseMap[item] || item);
+
+  return CONFINED_COURSE_OPTIONS.filter((option) => normalized.includes(option));
+}
+
+function formatConfinedCourseSelections(selections: string[]): string {
+  return CONFINED_COURSE_OPTIONS.filter((option) => selections.includes(option)).join(", ");
+}
+
+function getConfinedCourseOptionClasses(course: string, selected: boolean): string {
+  const colors = CONFINED_COURSE_COLOR_MAP[course as (typeof CONFINED_COURSE_OPTIONS)[number]] ?? {
+    optionIdle: "border-gray-200 bg-white text-gray-700 hover:border-teal-300 hover:bg-teal-50",
+    optionActive: "border-teal-400 bg-teal-100 text-teal-900 shadow-sm",
+  };
+
+  return selected ? colors.optionActive : colors.optionIdle;
+}
+
+function getConfinedCourseTableClasses(course: (typeof CONFINED_COURSE_OPTIONS)[number], selected: boolean) {
+  const colors = CONFINED_COURSE_COLOR_MAP[course];
+
+  return {
+    wrapper: selected ? colors.tableSelected : colors.tableEmpty,
+    check: selected ? colors.checkSelected : colors.checkEmpty,
+  };
+}
+
+function getConfinedTableColumnClasses(column: { courseOption?: (typeof CONFINED_COURSE_OPTIONS)[number] }) {
+  return column.courseOption ? "w-24 min-w-[6rem]" : "";
+}
+
+function getConfinedStatusDotClasses(status: string) {
+  if (status === "ปฏิบัติงาน") {
+    return "border-green-200 bg-green-500";
+  }
+
+  if (status === "พ้นสภาพ" || status === "ลาออก") {
+    return "border-red-200 bg-red-500";
+  }
+
+  return "border-slate-200 bg-slate-400";
+}
+
+function getConfinedExpireDateCell(record?: Partial<TrainingRecord> | null): { label: string; classes: string } {
+  const remainingDays = getTrainingRemainingDays(record);
+
+  if (remainingDays === null) {
+    return {
+      label: "-",
+      classes: "border-slate-200 bg-slate-50 text-slate-400",
+    };
+  }
+
+  if (remainingDays < 0) {
+    return {
+      label: `หมด ${Math.abs(remainingDays)} วัน`,
+      classes: "border-red-200 bg-red-50 text-red-700",
+    };
+  }
+
+  if (remainingDays <= 30) {
+    return {
+      label: `เหลือ ${remainingDays} วัน`,
+      classes: "border-amber-200 bg-amber-50 text-amber-700",
+    };
+  }
+
+  return {
+    label: `เหลือ ${remainingDays} วัน`,
+    classes: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  };
+}
+
+function getConfinedTrainingHistory(trainee?: Partial<ConfinedSpaceTrainee> | null): TrainingRecord[] {
+  const directHistory = Array.isArray(trainee?.trainingHistory) ? trainee?.trainingHistory ?? [] : [];
+  const legacyHistory = [trainee?.round1, trainee?.round2, trainee?.round3, trainee?.round4];
+  const latestTrainingFallback = [
+    {
+      date: trainee?.lastTrainDate ?? "",
+      institute: trainee?.institute ?? "",
+      cer: trainee?.cer ?? "",
+      cerFiles: [],
+      certificateExpireValue: "",
+      certificateExpireUnit: "day" as CertificateExpireUnit,
+      remark: trainee?.remark ?? "",
+    },
+  ];
+  const renewalFallback = trainee?.renewal3yr ? [trainee.renewal3yr] : [];
+  const source = directHistory.length > 0
+    ? directHistory
+    : legacyHistory.some((record) => hasTrainingRecordData(record))
+      ? legacyHistory
+      : latestTrainingFallback.some((record) => hasTrainingRecordData(record))
+        ? latestTrainingFallback
+        : renewalFallback;
+
+  return source
+    .map((record) => normalizeTrainingRecord(record))
+    .filter((record) => hasTrainingRecordData(record));
+}
+
+function confinedToRow(t: ConfinedSpaceTrainee): Record<string, string> {
+  const trainingHistory = getConfinedTrainingHistory(t);
+  const row: Record<string, string> = {
+    "ชื่อ-สกุล": t.fullName,
+    "ต้นสังกัด": t.company,
+    "ตำแหน่ง": t.position,
+    "ประเภท": t.type,
+    "สถานะ": t.status,
+    "โครงการ": t.project,
+    "หลักสูตร": t.course,
+    "วันที่อบรมล่าสุด": t.lastTrainDate,
+    "สถาบันอบรม": t.institute,
+    "CER.": t.cer,
+    "หมายเหตุ": t.remark,
+    "วันที่เช็ค": t.checkDate || "",
+  };
+
+  trainingHistory.forEach((record, index) => {
+    const round = index + 1;
+    row[`อบรมครั้งที่${round}_วันที่`] = record.date;
+    row[`อบรมครั้งที่${round}_สถาบัน`] = record.institute;
+    row[`อบรมครั้งที่${round}_CER`] = formatCerSummary(record);
+    row[`อบรมครั้งที่${round}_CERไฟล์`] = record.cerFiles.map((file) => `${file.name}|${file.url}`).join("\n");
+    row[`อบรมครั้งที่${round}_CertificateExpire`] = record.certificateExpireValue;
+    row[`อบรมครั้งที่${round}_CertificateExpireUnit`] = record.certificateExpireUnit === "year" ? "ปี" : "วัน";
+    row[`อบรมครั้งที่${round}_วันหมดอายุ`] = getTrainingExpiryDate(record);
+    row[`อบรมครั้งที่${round}_คงเหลือวัน`] = getTrainingRemainingDays(record)?.toString() ?? "";
+    row[`อบรมครั้งที่${round}_หมายเหตุ`] = record.remark;
+  });
+
+  return row;
+}
+
+function rowToConfined(row: Record<string, string>, id: number): ConfinedSpaceTrainee {
+  const historyIndexes = Array.from(
+    new Set(
+      Object.keys(row)
+        .map((key) => key.match(/^อบรมครั้งที่(\d+)_/))
+        .filter((match): match is RegExpMatchArray => Boolean(match))
+        .map((match) => Number(match[1]))
+        .filter((index) => Number.isInteger(index) && index > 0)
+    )
+  ).sort((a, b) => a - b);
+
+  const trainingHistory = historyIndexes
+    .map((index) => ({
+      date: row[`อบรมครั้งที่${index}_วันที่`] || "",
+      institute: row[`อบรมครั้งที่${index}_สถาบัน`] || "",
+      cer: row[`อบรมครั้งที่${index}_CER`] || "",
+      cerFiles: (row[`อบรมครั้งที่${index}_CERไฟล์`] || "")
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => {
+          const [name, ...urlParts] = item.split("|");
+          const url = urlParts.join("|");
+          return { name: name || url, url: url || name };
+        })
+        .filter((file) => Boolean(file.url)),
+      certificateExpireValue: row[`อบรมครั้งที่${index}_CertificateExpire`] || "",
+      certificateExpireUnit: (["ปี", "year"].includes((row[`อบรมครั้งที่${index}_CertificateExpireUnit`] || "").toLowerCase()) ? "year" : "day") as CertificateExpireUnit,
+      remark: row[`อบรมครั้งที่${index}_หมายเหตุ`] || "",
+    }))
+    .map((record) => normalizeTrainingRecord(record))
+    .filter((record) => hasTrainingRecordData(record));
+
+  const legacyRenewal = normalizeTrainingRecord({
+    date: row["ครบรอบ3ปี_วันที่"] || "",
+    institute: row["ครบรอบ3ปี_สถาบัน"] || "",
+    cer: row["ครบรอบ3ปี_CER"] || "",
+  });
+
+  const fallbackLatestRecord = normalizeTrainingRecord({
+    date: row["วันที่อบรมล่าสุด"] || "",
+    institute: row["สถาบันอบรม"] || "",
+    cer: row["CER."] || "",
+    remark: row["หมายเหตุ"] || "",
+  });
+
+  const normalizedHistory = trainingHistory.length > 0
+    ? trainingHistory
+    : hasTrainingRecordData(fallbackLatestRecord)
+      ? [fallbackLatestRecord]
+      : hasTrainingRecordData(legacyRenewal)
+        ? [legacyRenewal]
+        : [];
+
+  return syncConfinedTrainingHistory({
+    id,
+    fullName: row["ชื่อ-สกุล"] || "",
+    company: row["ต้นสังกัด"] || "",
+    position: row["ตำแหน่ง"] || "",
+    type: row["ประเภท"] || "",
+    status: row["สถานะ"] || "ปฏิบัติงาน",
+    project: row["โครงการ"] || "",
+    course: row["หลักสูตร"] || "",
+    lastTrainDate: row["วันที่อบรมล่าสุด"] || "",
+    institute: row["สถาบันอบรม"] || "",
+    cer: row["CER."] || "",
+    trainingHistory: normalizedHistory,
+    round1: normalizedHistory[0] || createEmptyTrainingRecord(),
+    round2: normalizedHistory[1] || createEmptyTrainingRecord(),
+    round3: normalizedHistory[2] || createEmptyTrainingRecord(),
+    round4: normalizedHistory[3] || createEmptyTrainingRecord(),
+    renewal3yr: legacyRenewal,
+    remark: row["หมายเหตุ"] || "",
+    checkDate: row["วันที่เช็ค"] || "",
+  }, normalizedHistory);
+}
+
+const CONFINED_TABLE_COLUMNS: { key: string; label: string; courseOption?: (typeof CONFINED_COURSE_OPTIONS)[number] }[] = [
   { key: "fullName", label: "ชื่อ-สกุล" },
   { key: "company", label: "ต้นสังกัด" },
   { key: "position", label: "ตำแหน่ง" },
   { key: "type", label: "ประเภท" },
   { key: "status", label: "สถานะ" },
   { key: "project", label: "โครงการ" },
-  { key: "course", label: "หลักสูตร" },
-  { key: "lastTrainDate", label: "วันที่อบรมล่าสุด" },
-  { key: "institute", label: "สถาบัน" },
-  { key: "cer", label: "CER." },
-  { key: "renewal3yrDate", label: "ครบรอบ 3 ปี (วันที่)" },
-  { key: "renewal3yrCer", label: "CER. ใหม่" },
-  { key: "remark", label: "หมายเหตุ" },
-  { key: "checkDate", label: "วันที่เช็ค" },
+  { key: "coursePermit", label: "ผู้อนุญาต", courseOption: "ผู้อนุญาต" },
+  { key: "courseSupervisor", label: "ผู้ควบคุม", courseOption: "ผู้ควบคุม" },
+  { key: "courseRescuer", label: "ผู้ช่วยเหลือ", courseOption: "ผู้ช่วยเหลือ" },
+  { key: "courseWorker", label: "ผู้ปฏิบัติงาน", courseOption: "ผู้ปฏิบัติงาน" },
+  { key: "trainingCount", label: "จำนวนครั้ง" },
+  { key: "expireDate", label: "Expire Date" },
 ];
-
-function confinedToRow(t: ConfinedSpaceTrainee): Record<string, string> {
-  return {
-    "ชื่อ-สกุล": t.fullName, "ต้นสังกัด": t.company, "ตำแหน่ง": t.position,
-    "ประเภท": t.type, "สถานะ": t.status, "โครงการ": t.project, "หลักสูตร": t.course,
-    "วันที่อบรมล่าสุด": t.lastTrainDate, "สถาบันอบรม": t.institute, "CER.": t.cer,
-    "ครบรอบ3ปี_วันที่": t.renewal3yr.date, "ครบรอบ3ปี_สถาบัน": t.renewal3yr.institute, "ครบรอบ3ปี_CER": t.renewal3yr.cer,
-    "หมายเหตุ": t.remark, "วันที่เช็ค": t.checkDate,
-  };
-}
-
-function rowToConfined(row: Record<string, string>, id: number): ConfinedSpaceTrainee {
-  return {
-    id,
-    fullName: row["ชื่อ-สกุล"] || "", company: row["ต้นสังกัด"] || "",
-    position: row["ตำแหน่ง"] || "", type: row["ประเภท"] || "",
-    status: row["สถานะ"] || "ปฏิบัติงาน", project: row["โครงการ"] || "",
-    course: row["หลักสูตร"] || "", lastTrainDate: row["วันที่อบรมล่าสุด"] || "",
-    institute: row["สถาบันอบรม"] || "", cer: row["CER."] || "",
-    renewal3yr: {
-      date: row["ครบรอบ3ปี_วันที่"] || "",
-      institute: row["ครบรอบ3ปี_สถาบัน"] || "",
-      cer: row["ครบรอบ3ปี_CER"] || "",
-      cerFiles: [],
-      certificateExpireValue: "",
-      certificateExpireUnit: "day",
-      remark: "",
-    },
-    remark: row["หมายเหตุ"] || "", checkDate: row["วันที่เช็ค"] || "",
-  };
-}
 
 function ConfinedSpaceRegisterList({
   trainees,
@@ -2596,19 +3269,22 @@ function ConfinedSpaceRegisterList({
 }) {
   const [search, setSearch] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+  const [selectedTrainee, setSelectedTrainee] = useState<ConfinedSpaceTrainee | null>(null);
   const [visibleColumns, setVisibleColumns] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(CONFINED_TABLE_COLUMNS.map((c) => [c.key, true]))
+    CONFINED_TABLE_COLUMNS.reduce((acc, c) => ({ ...acc, [c.key]: true }), {})
   );
   const [columnPopupOpen, setColumnPopupOpen] = useState(false);
   const columnPopupRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
+    const handleClickOutside = (e: MouseEvent) => {
       if (columnPopupRef.current && !columnPopupRef.current.contains(e.target as Node)) setColumnPopupOpen(false);
     };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, []);
+    if (columnPopupOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+      return () => document.removeEventListener("mousedown", handleClickOutside);
+    }
+  }, [columnPopupOpen]);
 
   const filtered = trainees.filter(
     (t) =>
@@ -2616,9 +3292,10 @@ function ConfinedSpaceRegisterList({
       t.project.toLowerCase().includes(search.toLowerCase()) ||
       t.company.toLowerCase().includes(search.toLowerCase())
   );
+  const maxHistoryCount = Math.max(1, ...trainees.map((t) => getConfinedTrainingHistory(t).length));
 
   const handleExportTemplate = () => {
-    const ws = XLSX.utils.aoa_to_sheet([CONFINED_COLUMNS]);
+    const ws = XLSX.utils.aoa_to_sheet([getConfinedExportColumns(maxHistoryCount)]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Template");
     XLSX.writeFile(wb, "template_confined_space_register.xlsx");
@@ -2626,7 +3303,7 @@ function ConfinedSpaceRegisterList({
 
   const handleExport = () => {
     const rows = trainees.map(confinedToRow);
-    const ws = XLSX.utils.json_to_sheet(rows, { header: CONFINED_COLUMNS });
+    const ws = XLSX.utils.json_to_sheet(rows, { header: getConfinedExportColumns(maxHistoryCount) });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "ทะเบียนที่อับอากาศ");
     XLSX.writeFile(wb, "confined_space_register.xlsx");
@@ -2651,10 +3328,13 @@ function ConfinedSpaceRegisterList({
   return (
     <div>
       <div className="flex flex-wrap justify-between items-center mb-5 gap-3">
-        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-          <Wind className="text-teal-500" size={22} />
-          ทะเบียนรายชื่อผู้อบรมที่อับอากาศ (Confined Space)
-        </h2>
+        <div className="space-y-1">
+          <h2 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
+            <Wind className="text-teal-500" size={22} />
+            ทะเบียนรายชื่อผู้อบรมที่อับอากาศ (Confined Space)
+          </h2>
+          <div className="text-sm text-slate-500">ทั้งหมด {filtered.length} โครงการ</div>
+        </div>
         <div className="flex flex-wrap gap-2">
           <div className="relative" ref={columnPopupRef}>
             <button
@@ -2703,9 +3383,9 @@ function ConfinedSpaceRegisterList({
       <div className="bg-white border border-slate-200 rounded-[24px] p-4 sm:p-5 shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)]">
         <div className="relative">
           <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
-        <input type="text" placeholder="ค้นหาชื่อ, โครงการ, บริษัท..."
-          value={search} onChange={(e) => setSearch(e.target.value)}
-          className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          <input type="text" placeholder="ค้นหาชื่อ, โครงการ, บริษัท..."
+            value={search} onChange={(e) => setSearch(e.target.value)}
+            className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
         </div>
       </div>
 
@@ -2720,48 +3400,279 @@ function ConfinedSpaceRegisterList({
               <tr className="bg-teal-600 text-white text-xs">
                 <th className="px-3 py-2 text-left font-semibold">#</th>
                 {CONFINED_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((c) => (
-                  <th key={c.key} className="px-3 py-2 text-left font-semibold">{c.label}</th>
+                  <th key={c.key} className={`px-3 py-2 text-left font-semibold ${getConfinedTableColumnClasses(c)}`}>{c.label}</th>
                 ))}
-                <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody>
               {filtered.map((t, idx) => (
-                <tr key={t.id} className={idx % 2 === 0 ? "bg-teal-50" : "bg-white"}>
-                  <td className="px-3 py-2 text-gray-500">{idx + 1}</td>
-                  {CONFINED_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((col) => (
-                    <td key={col.key} className="px-3 py-2 text-gray-600 whitespace-nowrap">
-                      {col.key === "fullName" && <span className="font-medium text-gray-800">{t.fullName}</span>}
-                      {col.key === "company" && t.company}
-                      {col.key === "position" && t.position}
-                      {col.key === "type" && t.type}
-                      {col.key === "status" && (
-                        <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 border border-green-200">{t.status}</span>
-                      )}
-                      {col.key === "project" && t.project}
-                      {col.key === "course" && t.course}
-                      {col.key === "lastTrainDate" && t.lastTrainDate}
-                      {col.key === "institute" && t.institute}
-                      {col.key === "cer" && t.cer}
-                      {col.key === "renewal3yrDate" && (t.renewal3yr.date || "-")}
-                      {col.key === "renewal3yrCer" && (t.renewal3yr.cer || "-")}
-                      {col.key === "remark" && t.remark}
-                      {col.key === "checkDate" && t.checkDate}
-                    </td>
-                  ))}
-                  <td className="px-3 py-2">
-                    <div className="flex gap-1">
-                      <button onClick={() => onEdit(t)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition" title="แก้ไข"><Pencil size={14} /></button>
-                      <button onClick={() => onDelete(t.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded transition" title="ลบ"><Trash2 size={14} /></button>
-                    </div>
-                  </td>
-                </tr>
+                (() => {
+                  const trainingHistory = getConfinedTrainingHistory(t);
+                  const selectedCourses = normalizeConfinedCourseSelections(t.course);
+                  const trainingCount = trainingHistory.length;
+                  const latestTrainingRecord = trainingHistory[trainingHistory.length - 1];
+                  const expireDateCell = getConfinedExpireDateCell(latestTrainingRecord);
+
+                  return (
+                    <tr
+                      key={t.id}
+                      className={`${idx % 2 === 0 ? "bg-teal-50" : "bg-white"} cursor-pointer transition hover:bg-teal-100/80`}
+                      onClick={() => setSelectedTrainee(t)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setSelectedTrainee(t);
+                        }
+                      }}
+                      tabIndex={0}
+                    >
+                      <td className="px-3 py-2 text-gray-500">{idx + 1}</td>
+                      {CONFINED_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((col) => (
+                        <td key={col.key} className={`px-3 py-2 text-gray-600 whitespace-nowrap ${getConfinedTableColumnClasses(col)}`}>
+                          {col.courseOption && (() => {
+                            const isSelected = selectedCourses.includes(col.courseOption!);
+                            const courseClasses = getConfinedCourseTableClasses(col.courseOption!, isSelected);
+
+                            return (
+                              <span className={`inline-flex items-center justify-center rounded-lg border px-2 py-1.5 ${courseClasses.wrapper}`}>
+                                <span className={`inline-flex h-4 w-4 items-center justify-center rounded border ${courseClasses.check}`}>
+                                  <CheckCircle size={11} />
+                                </span>
+                              </span>
+                            );
+                          })()}
+                          {!col.courseOption && col.key === "fullName" && <span className="font-medium text-gray-800">{t.fullName}</span>}
+                          {!col.courseOption && col.key === "company" && t.company}
+                          {!col.courseOption && col.key === "position" && t.position}
+                          {!col.courseOption && col.key === "type" && t.type}
+                          {!col.courseOption && col.key === "status" && (
+                            <div className="flex items-center gap-2">
+                              <span className={`inline-flex h-3.5 w-3.5 rounded-full border ${getConfinedStatusDotClasses(t.status)}`} />
+                              <span>{t.status || "-"}</span>
+                            </div>
+                          )}
+                          {!col.courseOption && col.key === "project" && t.project}
+                          {!col.courseOption && col.key === "trainingCount" && (
+                            <span className="inline-flex min-w-[2.5rem] justify-center rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-700">
+                              {trainingCount}
+                            </span>
+                          )}
+                          {!col.courseOption && col.key === "expireDate" && (
+                            <span className={`inline-flex min-w-[5rem] justify-center rounded-full border px-2.5 py-1 text-xs font-semibold ${expireDateCell.classes}`}>
+                              {expireDateCell.label}
+                            </span>
+                          )}
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })()
               ))}
             </tbody>
           </table>
         </div>
       )}
+
+      {selectedTrainee && (
+        <ConfinedSpaceTraineeDetailModal
+          trainee={selectedTrainee}
+          onClose={() => setSelectedTrainee(null)}
+          onEdit={(trainee) => {
+            setSelectedTrainee(null);
+            onEdit(trainee);
+          }}
+          onDelete={(id) => {
+            setSelectedTrainee(null);
+            onDelete(id);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+function ConfinedSpaceTraineeDetailModal({
+  trainee,
+  onClose,
+  onEdit,
+  onDelete,
+}: {
+  trainee: ConfinedSpaceTrainee;
+  onClose: () => void;
+  onEdit: (trainee: ConfinedSpaceTrainee) => void;
+  onDelete: (id: number) => void;
+}) {
+  const selectedCourses = normalizeConfinedCourseSelections(trainee.course);
+  const trainingHistory = getConfinedTrainingHistory(trainee);
+
+  const infoItems = [
+    { label: "รหัสพนักงาน", value: trainee.employeeCode || "-" },
+    { label: "ชื่อ-สกุล", value: trainee.fullName || "-" },
+    { label: "ต้นสังกัด", value: trainee.company || "-" },
+    { label: "ตำแหน่ง", value: trainee.position || "-" },
+    { label: "ประเภท", value: trainee.type || "-" },
+    { label: "สถานะ", value: trainee.status || "-" },
+    { label: "โครงการ", value: trainee.project || "-" },
+    { label: "จำนวนครั้งอบรม", value: String(trainingHistory.length) },
+  ];
+
+  return (
+    <ModalShell onClose={onClose}>
+      <div className="mx-auto flex max-h-[calc(100vh-2rem)] max-w-4xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between gap-4 border-b border-teal-100 bg-teal-50 p-5">
+          <div>
+            <h3 className="flex items-center gap-2 text-xl font-bold text-slate-900">
+              <Wind size={20} className="text-teal-600" />
+              รายละเอียดผู้เข้าอบรมที่อับอากาศ
+            </h3>
+            <p className="mt-1 text-sm text-slate-500">{trainee.fullName || "-"}</p>
+          </div>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-700"><X size={20} /></button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-6">
+          <div className="space-y-6">
+            <section className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+              <h4 className="text-sm font-bold text-slate-800">ข้อมูลทั่วไป</h4>
+              <div className="mt-2.5 grid grid-cols-1 gap-2.5 md:grid-cols-2">
+                {infoItems.map((item) => (
+                  <div key={item.label} className="rounded-lg border border-white bg-white px-3 py-2.5 shadow-sm">
+                    <div className="text-[11px] font-medium text-slate-500">{item.label}</div>
+                    <div className="mt-0.5 text-xs font-semibold text-slate-900">{item.value}</div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="rounded-2xl border border-slate-200 bg-white p-5">
+              <h4 className="text-sm font-bold text-slate-800">บทบาทที่อบรม</h4>
+              <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+                {CONFINED_COURSE_OPTIONS.map((course) => {
+                  const isSelected = selectedCourses.includes(course);
+                  const courseClasses = getConfinedCourseTableClasses(course, isSelected);
+
+                  return (
+                    <div key={course} className={`rounded-xl border p-3 ${courseClasses.wrapper}`}>
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-flex h-4 w-4 items-center justify-center rounded border ${courseClasses.check}`}>
+                          <CheckCircle size={11} />
+                        </span>
+                        <span className="text-xs font-semibold leading-tight">{course}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="rounded-2xl border border-slate-200 bg-white p-5">
+              <div className="flex items-center justify-between gap-3">
+                <h4 className="text-sm font-bold text-slate-800">ประวัติการอบรม</h4>
+                <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">
+                  ทั้งหมด {trainingHistory.length} ครั้ง
+                </span>
+              </div>
+
+              {trainingHistory.length === 0 ? (
+                <div className="mt-3 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-center text-xs text-slate-400">
+                  ยังไม่มีประวัติการอบรม
+                </div>
+              ) : (
+                <div className="mt-3 space-y-2.5">
+                  {trainingHistory.map((record, index) => {
+                    const expiryStatus = getTrainingExpiryStatus(record);
+                    const expiryDate = getTrainingExpiryDate(record);
+
+                    return (
+                      <div key={`${record.date}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <div className="text-xs font-bold text-slate-900">ครั้งที่ {index + 1}</div>
+                            <div className="mt-0.5 text-[11px] text-slate-500">{formatDateLabel(record.date)}</div>
+                          </div>
+                          {expiryStatus && (
+                            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${expiryStatus.tone}`}>
+                              {expiryStatus.label}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+                          <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
+                            <div className="text-[10px] font-medium text-slate-500">สถาบัน</div>
+                            <div className="mt-0.5 text-xs text-slate-900">{record.institute || "-"}</div>
+                          </div>
+                          <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
+                            <div className="text-[10px] font-medium text-slate-500">CER.</div>
+                            <div className="mt-0.5 text-xs text-slate-900">{formatCerSummary(record) || "-"}</div>
+                          </div>
+                          <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
+                            <div className="text-[10px] font-medium text-slate-500">วันหมดอายุ</div>
+                            <div className="mt-0.5 text-xs text-slate-900">{formatDateLabel(expiryDate) || "-"}</div>
+                          </div>
+                          <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
+                            <div className="text-[10px] font-medium text-slate-500">ไฟล์ CER</div>
+                            <div className="mt-1.5 flex flex-wrap gap-1.5">
+                              {record.cerFiles.length > 0 ? record.cerFiles.map((file, fileIndex) => (
+                                <a
+                                  key={`${file.url}-${fileIndex}`}
+                                  href={file.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="inline-flex rounded-md border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700 hover:bg-sky-100"
+                                >
+                                  {file.name || `ไฟล์ ${fileIndex + 1}`}
+                                </a>
+                              )) : <span className="text-xs text-slate-400">-</span>}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
+                            <div className="text-[10px] font-medium text-slate-500">หมายเหตุ</div>
+                            <div className="mt-0.5 text-xs text-slate-900">{record.remark || "-"}</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-slate-50 px-6 py-4">
+          <button
+            type="button"
+            onClick={() => {
+              if (window.confirm(`ต้องการลบรายการ ${trainee.fullName || ""} ใช่หรือไม่?`)) {
+                onDelete(trainee.id);
+              }
+            }}
+            className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-white px-4 py-2 text-sm font-medium text-red-600 transition hover:bg-red-50"
+          >
+            <Trash2 size={15} />
+            ลบรายการ
+          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+            >
+              ปิด
+            </button>
+            <button
+              type="button"
+              onClick={() => onEdit(trainee)}
+              className="inline-flex items-center gap-2 rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-teal-700"
+            >
+              <Pencil size={15} />
+              แก้ไขรายการ
+            </button>
+          </div>
+        </div>
+      </div>
+    </ModalShell>
   );
 }
 
@@ -2769,9 +3680,250 @@ const EMPTY_CONFINED_TRAINEE: ConfinedSpaceTrainee = {
   employeeCode: "",
   id: 0, fullName: "", company: "", position: "", type: "", status: "ปฏิบัติงาน",
   project: "", course: "", lastTrainDate: "", institute: "", cer: "",
+  trainingHistory: [],
+  round1: createEmptyTrainingRecord(),
+  round2: createEmptyTrainingRecord(),
+  round3: createEmptyTrainingRecord(),
+  round4: createEmptyTrainingRecord(),
   renewal3yr: createEmptyTrainingRecord(),
   remark: "", checkDate: "",
 };
+
+function syncConfinedTrainingHistory(trainee: ConfinedSpaceTrainee, history: TrainingRecord[]): ConfinedSpaceTrainee {
+  const normalizedHistory = history
+    .map((record) => normalizeTrainingRecord(record))
+    .filter((record) => hasTrainingRecordData(record));
+  const latestRecord = normalizedHistory[normalizedHistory.length - 1];
+
+  return {
+    ...trainee,
+    lastTrainDate: latestRecord?.date ?? "",
+    institute: latestRecord?.institute ?? "",
+    cer: latestRecord ? formatCerSummary(latestRecord) : "",
+    remark: latestRecord?.remark ?? trainee.remark ?? "",
+    trainingHistory: normalizedHistory,
+    round1: normalizedHistory[0] ?? createEmptyTrainingRecord(),
+    round2: normalizedHistory[1] ?? createEmptyTrainingRecord(),
+    round3: normalizedHistory[2] ?? createEmptyTrainingRecord(),
+    round4: normalizedHistory[3] ?? createEmptyTrainingRecord(),
+  };
+}
+
+function normalizeConfinedTrainee(trainee: ConfinedSpaceTrainee | null): ConfinedSpaceTrainee {
+  return syncConfinedTrainingHistory(
+    {
+      ...EMPTY_CONFINED_TRAINEE,
+      ...(trainee ?? {}),
+      employeeCode: trainee?.employeeCode ?? "",
+      checkDate: trainee?.checkDate ?? "",
+    },
+    getConfinedTrainingHistory(trainee)
+  );
+}
+
+function ConfinedSpaceTrainingHistoryModal({
+  title,
+  record,
+  traineeKey,
+  onClose,
+  onSave,
+}: {
+  title: string;
+  record: TrainingRecord;
+  traineeKey: string;
+  onClose: () => void;
+  onSave: (record: TrainingRecord) => void;
+}) {
+  const [form, setForm] = useState<TrainingRecord>(normalizeTrainingRecord(record));
+  const [uploading, setUploading] = useState(false);
+  const { firebaseUser } = useAuth();
+  const expiryStatus = getTrainingExpiryStatus(form);
+  const expiryDate = getTrainingExpiryDate(form);
+  const expireDays = getCertificateExpireDays(form);
+
+  const set = (field: keyof TrainingRecord, value: string) =>
+    setForm((prev) => ({ ...prev, [field]: value }));
+
+  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    if (!files.length) return;
+    if (!firebaseUser?.uid || !storage) {
+      alert("ไม่สามารถอัปโหลดไฟล์ได้ในขณะนี้");
+      event.target.value = "";
+      return;
+    }
+
+    setUploading(true);
+    try {
+      const uploadedFiles = await uploadConfinedCertificateFiles(files, firebaseUser.uid, traineeKey, form.date);
+      setForm((prev) => {
+        const nextFiles = [...prev.cerFiles, ...uploadedFiles];
+        return {
+          ...prev,
+          cerFiles: nextFiles,
+          cer: nextFiles.length > 0 ? `แนบ ${nextFiles.length} ไฟล์` : "",
+        };
+      });
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "อัปโหลดไฟล์ไม่สำเร็จ");
+    } finally {
+      setUploading(false);
+      event.target.value = "";
+    }
+  };
+
+  const removeCerFile = (index: number) => {
+    setForm((prev) => {
+      const nextFiles = prev.cerFiles.filter((_, fileIndex) => fileIndex !== index);
+      return {
+        ...prev,
+        cerFiles: nextFiles,
+        cer: nextFiles.length > 0 ? `แนบ ${nextFiles.length} ไฟล์` : "",
+      };
+    });
+  };
+
+  const handleSave = () => {
+    if (!form.date.trim()) {
+      alert("กรุณากรอกวันที่อบรมล่าสุด");
+      return;
+    }
+
+    onSave(normalizeTrainingRecord({
+      ...form,
+      cer: form.cerFiles.length > 0 ? `แนบ ${form.cerFiles.length} ไฟล์` : form.cer,
+    }));
+  };
+
+  return (
+    <ModalShell onClose={onClose}>
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden max-w-2xl mx-auto">
+        <div className="bg-teal-50 p-4 border-b border-teal-100 flex justify-between items-center">
+          <h3 className="font-bold text-teal-900 text-lg">{title}</h3>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-700"><X size={20} /></button>
+        </div>
+
+        <div className="p-6 space-y-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">วันที่อบรมล่าสุด</label>
+              <input
+                type="date"
+                value={form.date}
+                onChange={(e) => set("date", e.target.value)}
+                className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
+              />
+              <p className="mt-1 text-[11px] text-gray-400">mm/dd/yyyy</p>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">สถาบันอบรม</label>
+              <input
+                type="text"
+                value={form.institute}
+                onChange={(e) => set("institute", e.target.value)}
+                className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Certificate Expire</label>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  value={form.certificateExpireValue}
+                  onChange={(e) => set("certificateExpireValue", e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
+                  placeholder="เช่น 3 หรือ 1095"
+                />
+                <select
+                  value={form.certificateExpireUnit}
+                  onChange={(e) => setForm((prev) => ({ ...prev, certificateExpireUnit: e.target.value as CertificateExpireUnit }))}
+                  className="w-32 border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
+                >
+                  <option value="day">วัน</option>
+                  <option value="year">ปี</option>
+                </select>
+              </div>
+              <p className="mt-1 text-[11px] text-gray-400">
+                {expireDays === null ? "ยังไม่ได้กำหนดวันหมดอายุ" : `${expireDays} วัน (${form.certificateExpireUnit === "year" ? "คำนวณจากปี x 365 วัน" : "กำหนดเป็นวันโดยตรง"})`}
+              </p>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">หมายเหตุ</label>
+              <input
+                type="text"
+                value={form.remark}
+                onChange={(e) => set("remark", e.target.value)}
+                className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-2">CER.</label>
+            <div className="rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-4 space-y-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="inline-flex items-center gap-2 bg-white border border-gray-300 px-3 py-2 rounded-lg text-sm cursor-pointer hover:bg-gray-100 transition">
+                  <Upload size={15} />
+                  {uploading ? "กำลังอัปโหลด..." : "อัปโหลดไฟล์ CER"}
+                  <input type="file" multiple className="hidden" onChange={handleFileSelect} />
+                </label>
+                <span className="text-xs text-gray-500">อัปโหลดได้มากกว่า 1 ไฟล์ และไม่จำกัดขนาด</span>
+              </div>
+
+              {form.cerFiles.length === 0 ? (
+                <div className="text-sm text-gray-500">ยังไม่มีไฟล์ CER</div>
+              ) : (
+                <div className="space-y-2">
+                  {form.cerFiles.map((file, index) => (
+                    <div key={`${file.url}-${index}`} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2">
+                      <a href={file.url} target="_blank" rel="noreferrer" className="text-sm text-blue-600 hover:underline break-all">
+                        {file.name}
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => removeCerFile(index)}
+                        className="p-1.5 text-red-500 hover:bg-red-50 rounded transition"
+                        title="ลบไฟล์"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <span className="text-sm font-bold text-slate-800">สถานะใบรับรอง</span>
+              {expiryStatus ? (
+                <span className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${expiryStatus.tone}`}>
+                  {expiryStatus.label}
+                </span>
+              ) : (
+                <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-500">
+                  รอข้อมูลวันอบรมและ Certificate Expire
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm text-slate-600">
+              <div><span className="font-medium text-slate-800">วันที่อบรม:</span> {formatDateLabel(form.date)}</div>
+              <div><span className="font-medium text-slate-800">วันหมดอายุ:</span> {formatDateLabel(expiryDate)}</div>
+              <div><span className="font-medium text-slate-800">CER:</span> {formatCerSummary(form) || "-"}</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-gray-50 p-4 border-t border-gray-100 flex justify-end gap-3">
+          <button onClick={onClose} className="px-4 py-2 text-gray-600 font-medium hover:bg-gray-100 rounded-lg text-sm">ยกเลิก</button>
+          <button onClick={handleSave} disabled={uploading} className="px-6 py-2 bg-teal-600 text-white font-medium rounded-lg hover:bg-teal-700 disabled:bg-teal-300 shadow-sm transition text-sm">บันทึก</button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
 
 function ConfinedSpaceTraineeForm({
   trainee,
@@ -2784,16 +3936,17 @@ function ConfinedSpaceTraineeForm({
   onCancel: () => void;
   onSave: (t: ConfinedSpaceTrainee) => void;
 }) {
-  const [form, setForm] = useState<ConfinedSpaceTrainee>({
-    ...EMPTY_CONFINED_TRAINEE,
-    ...(trainee ?? {}),
-    employeeCode: trainee?.employeeCode ?? "",
-  });
+  const [form, setForm] = useState<ConfinedSpaceTrainee>(() => normalizeConfinedTrainee(trainee));
   const [employeeCode, setEmployeeCode] = useState(trainee?.employeeCode ?? "");
   const [lookup, setLookup] = useState<LookupFeedback>({ loading: false, error: "", success: "" });
+  const [historyModalState, setHistoryModalState] = useState<{ open: boolean; index: number | null }>({ open: false, index: null });
   const set = (field: keyof ConfinedSpaceTrainee, val: any) => setForm((prev) => ({ ...prev, [field]: val }));
-  const setRenewal = (field: keyof TrainingRecord, val: string) =>
-    setForm((prev) => ({ ...prev, renewal3yr: { ...prev.renewal3yr, [field]: val } }));
+  const selectedCourses = normalizeConfinedCourseSelections(form.course);
+  const trainingHistory = getConfinedTrainingHistory(form);
+
+  const updateTrainingHistory = (updater: (history: TrainingRecord[]) => TrainingRecord[]) => {
+    setForm((prev) => syncConfinedTrainingHistory(prev, updater(getConfinedTrainingHistory(prev))));
+  };
 
   const handleEmployeeCodeChange = (value: string) => {
     setEmployeeCode(value);
@@ -2802,6 +3955,8 @@ function ConfinedSpaceTraineeForm({
       ...prev,
       employeeCode: value,
       fullName: "",
+      company: "",
+      position: "",
       status: "",
     }));
   };
@@ -2817,14 +3972,23 @@ function ConfinedSpaceTraineeForm({
     try {
       const employee = await findMasterEmployee(code);
       if (!employee) {
-        setForm((prev) => ({ ...prev, employeeCode: code, fullName: "", status: "" }));
+        setForm((prev) => ({ ...prev, employeeCode: code, fullName: "", company: "", position: "", status: "" }));
         setLookup({ loading: false, error: "ไม่พบข้อมูลพนักงานจาก MasterDatabase", success: "" });
         return;
       }
+
+      if (!employee.fullName.trim()) {
+        setForm((prev) => ({ ...prev, employeeCode: code, fullName: "", company: employee.company || "", position: employee.position || "", status: employee.status || "" }));
+        setLookup({ loading: false, error: "พบข้อมูลพนักงาน แต่ชื่อ-สกุลใน MasterDatabase ยังไม่ครบ", success: "" });
+        return;
+      }
+
       setForm((prev) => ({
         ...prev,
         employeeCode: code,
         fullName: employee.fullName,
+        company: employee.company || prev.company,
+        position: employee.position || prev.position,
         status: employee.status,
       }));
       setLookup({ loading: false, error: "", success: "พบข้อมูลพนักงานแล้ว" });
@@ -2837,14 +4001,44 @@ function ConfinedSpaceTraineeForm({
     }
   };
 
+  const toggleCourse = (course: (typeof CONFINED_COURSE_OPTIONS)[number]) => {
+    const nextSelections = selectedCourses.includes(course)
+      ? selectedCourses.filter((item) => item !== course)
+      : [...selectedCourses, course];
+
+    set("course", formatConfinedCourseSelections(nextSelections));
+  };
+
   const txt = (label: string, field: keyof ConfinedSpaceTrainee, type = "text") => (
     <div>
       <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
-      <input type={type} value={form[field] as string}
+      <input
+        type={type}
+        value={form[field] as string}
         onChange={(e) => set(field, e.target.value)}
-        className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+        className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
+      />
+      {field === "lastTrainDate" && <p className="mt-1 text-[11px] text-gray-400">mm/dd/yyyy</p>}
     </div>
   );
+
+  const openHistoryModal = (index: number | null = null) => setHistoryModalState({ open: true, index });
+  const closeHistoryModal = () => setHistoryModalState({ open: false, index: null });
+
+  const handleSaveHistory = (record: TrainingRecord) => {
+    updateTrainingHistory((history) => {
+      if (historyModalState.index === null) {
+        return [...history, record];
+      }
+
+      return history.map((item, index) => (index === historyModalState.index ? record : item));
+    });
+    closeHistoryModal();
+  };
+
+  const handleDeleteHistory = (index: number) => {
+    updateTrainingHistory((history) => history.slice(0, index));
+  };
 
   const handleSave = () => {
     if (!employeeCode.trim() || !form.fullName.trim()) {
@@ -2852,8 +4046,11 @@ function ConfinedSpaceTraineeForm({
       return;
     }
 
-    onSave({ ...form, employeeCode: employeeCode.trim() });
+    onSave(syncConfinedTrainingHistory({ ...form, employeeCode: employeeCode.trim() }, trainingHistory));
   };
+
+  const modalRecord =
+    historyModalState.index === null ? createEmptyTrainingRecord() : trainingHistory[historyModalState.index] ?? createEmptyTrainingRecord();
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
@@ -2866,59 +4063,145 @@ function ConfinedSpaceTraineeForm({
       </div>
 
       <div className="p-6 space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <EmployeeCodeLookup
-            value={employeeCode}
-            onChange={handleEmployeeCodeChange}
-            onCheck={handleLookup}
-            loading={lookup.loading}
-            error={lookup.error}
-            success={lookup.success}
-          />
-          <ReadOnlyField label="ชื่อ-สกุล" value={form.fullName} />
-          {txt("ต้นสังกัด (บริษัท)", "company")}
-          {txt("ตำแหน่ง", "position")}
-          {txt("ประเภท", "type")}
-          <ReadOnlyField label="สถานะ" value={form.status} />
+        <section className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50/70 p-5">
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">โครงการ</label>
-            <select value={form.project} onChange={(e) => set("project", e.target.value)}
-              className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
-              <option value="">-- เลือกโครงการ --</option>
-              {projectCodes.map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
+            <h3 className="text-sm font-bold text-slate-800">ข้อมูลทั่วไป</h3>
+            <p className="text-xs text-slate-500 mt-1">ข้อมูลพนักงานและรายละเอียดพื้นฐานของผู้เข้าอบรม</p>
           </div>
-          {txt("หลักสูตร", "course")}
-          {txt("วันที่อบรมล่าสุด", "lastTrainDate", "date")}
-          {txt("สถาบันอบรม", "institute")}
-          {txt("CER.", "cer")}
-          {txt("หมายเหตุ", "remark")}
-          {txt("วันที่เช็ค", "checkDate", "date")}
-        </div>
 
-        <div>
-          <h3 className="text-sm font-bold text-gray-700 mb-3">ครบรอบการอบรม 3 ปี</h3>
-          <div className="border border-gray-200 rounded-lg p-4 bg-gray-50 grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <EmployeeCodeLookup
+              value={employeeCode}
+              onChange={handleEmployeeCodeChange}
+              onCheck={handleLookup}
+              loading={lookup.loading}
+              error={lookup.error}
+              success={lookup.success}
+            />
+            <ReadOnlyField label="ชื่อ-สกุล" value={form.fullName} />
+            {txt("ต้นสังกัด (บริษัท)", "company")}
+            {txt("ตำแหน่ง", "position")}
+            {txt("ประเภท", "type")}
+            <ReadOnlyField label="สถานะ" value={form.status} />
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">วันที่อบรม (ครบรอบ 3 ปี)</label>
-              <input type="date" value={form.renewal3yr.date}
-                onChange={(e) => setRenewal("date", e.target.value)}
-                className="w-full border border-gray-300 rounded p-2 text-sm focus:outline-none focus:ring-1 focus:ring-teal-400" />
+              <label className="block text-xs font-medium text-gray-600 mb-1">โครงการ</label>
+              <select
+                value={form.project}
+                onChange={(e) => set("project", e.target.value)}
+                className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
+              >
+                <option value="">-- เลือกโครงการ --</option>
+                {projectCodes.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">สถาบันอบรม</label>
-              <input type="text" value={form.renewal3yr.institute}
-                onChange={(e) => setRenewal("institute", e.target.value)}
-                className="w-full border border-gray-300 rounded p-2 text-sm focus:outline-none focus:ring-1 focus:ring-teal-400" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">CER.</label>
-              <input type="text" value={form.renewal3yr.cer}
-                onChange={(e) => setRenewal("cer", e.target.value)}
-                className="w-full border border-gray-300 rounded p-2 text-sm focus:outline-none focus:ring-1 focus:ring-teal-400" />
+            <div className="md:col-span-3">
+              <label className="block text-xs font-medium text-gray-600 mb-2">หลักสูตร</label>
+              <div className="overflow-x-auto rounded-xl border border-gray-300 bg-white p-3">
+                <div className="flex min-w-max justify-center gap-3">
+                  {CONFINED_COURSE_OPTIONS.map((course) => {
+                    const isSelected = selectedCourses.includes(course);
+
+                    return (
+                      <label
+                        key={course}
+                        className={`flex min-w-[220px] flex-shrink-0 items-center justify-center gap-3 rounded-xl border px-4 py-3 text-base font-medium cursor-pointer transition ${getConfinedCourseOptionClasses(course, isSelected)}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleCourse(course)}
+                          className="h-5 w-5 rounded border-gray-300 text-teal-500 focus:ring-teal-400"
+                        />
+                        <span className="whitespace-nowrap text-center leading-tight">{course}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+        </section>
+
+        <section className="space-y-4 rounded-2xl border border-teal-200 bg-teal-50/70 p-5">
+          <div className="rounded-2xl border border-white/80 bg-white p-4 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <div>
+                <h4 className="text-sm font-bold text-gray-800">การอบรม</h4>
+                <p className="text-xs text-gray-500 mt-1">จัดการผ่านปุ่มเพิ่มการอบรม และระบบจะอัปเดตข้อมูลอบรมล่าสุดให้อัตโนมัติ</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => openHistoryModal(null)}
+                className="flex items-center gap-1.5 bg-teal-600 hover:bg-teal-700 text-white px-3 py-2 rounded-lg text-sm font-medium shadow-sm transition"
+              >
+                <Plus size={15} /> Add การอบรม
+              </button>
+            </div>
+
+            {trainingHistory.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 px-4 py-6 text-center text-sm text-gray-500">
+                ยังไม่มีประวัติการอบรม
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {trainingHistory.map((record, index) => (
+                  <div key={`${record.date}-${index}`} className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                    {(() => {
+                      const expiryStatus = getTrainingExpiryStatus(record);
+                      const expiryDate = getTrainingExpiryDate(record);
+
+                      return (
+                        <>
+                          <div className="flex items-start justify-between gap-2 mb-3">
+                            <div>
+                              <p className="text-sm font-bold text-gray-800">ครั้งที่ {index + 1}</p>
+                              <p className="text-xs text-gray-500">{record.date || "-"}</p>
+                              {expiryStatus && (
+                                <span className={`mt-2 inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${expiryStatus.tone}`}>
+                                  {expiryStatus.label}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex gap-1">
+                              <button type="button" onClick={() => openHistoryModal(index)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition" title="แก้ไข"><Pencil size={14} /></button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteHistory(index)}
+                                className="p-1.5 text-red-500 hover:bg-red-50 rounded transition"
+                                title="ลบ"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </div>
+                          <div className="space-y-2 text-sm text-gray-600">
+                            <div><span className="font-medium text-gray-800">สถาบัน:</span> {record.institute || "-"}</div>
+                            <div><span className="font-medium text-gray-800">CER.:</span> {formatCerSummary(record) || "-"}</div>
+                            <div><span className="font-medium text-gray-800">Certificate Expire:</span> {record.certificateExpireValue ? `${record.certificateExpireValue} ${record.certificateExpireUnit === "year" ? "ปี" : "วัน"}` : "-"}</div>
+                            <div><span className="font-medium text-gray-800">วันหมดอายุ:</span> {formatDateLabel(expiryDate)}</div>
+                            {record.cerFiles.length > 0 && (
+                              <div className="space-y-1">
+                                <div><span className="font-medium text-gray-800">ไฟล์ CER:</span> {record.cerFiles.length} ไฟล์</div>
+                                <div className="flex flex-col gap-1">
+                                  {record.cerFiles.map((file, fileIndex) => (
+                                    <a key={`${file.url}-${fileIndex}`} href={file.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all">
+                                      {file.name}
+                                    </a>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            <div><span className="font-medium text-gray-800">หมายเหตุ:</span> {record.remark || "-"}</div>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
       </div>
 
       <div className="bg-gray-50 p-4 border-t border-gray-100 flex justify-end gap-3">
@@ -2928,6 +4211,16 @@ function ConfinedSpaceTraineeForm({
           บันทึก
         </button>
       </div>
+
+      {historyModalState.open && (
+        <ConfinedSpaceTrainingHistoryModal
+          title={historyModalState.index === null ? "เพิ่มประวัติการอบรม" : "แก้ไขประวัติการอบรม"}
+          record={modalRecord}
+          traineeKey={form.employeeCode || String(form.id || "new")}
+          onClose={closeHistoryModal}
+          onSave={handleSaveHistory}
+        />
+      )}
     </div>
   );
 }
@@ -3253,30 +4546,87 @@ function DailyReportList({
           ไม่พบรายงานที่ต้องดำเนินการในขณะนี้
         </div>
       ) : (
-        <div className="grid gap-3">
-          {reports.map((report) => (
-            <div
-              key={report.id}
-              onClick={() => onSelectReport(report)}
-              className="bg-white p-4 rounded-[24px] shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)] border border-slate-200 hover:shadow-lg transition cursor-pointer flex justify-between items-center"
-            >
-              <div>
-                <div className="flex items-center gap-2 mb-1 flex-wrap">
-                  <span className="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-0.5 rounded">{getReportDocNo(report)}</span>
-                  <span className="text-gray-500 text-xs flex items-center gap-1"><Clock size={12} /> {report.date}</span>
-                </div>
-                <h3 className="font-medium text-gray-800">{report.toolboxTopic || "No Topic"}</h3>
-                <div className="text-sm text-gray-500 mt-1">โดย: {report.staffName}</div>
-              </div>
-              <div className="flex flex-col items-end gap-2">
-                <StatusBadge status={report.status} />
-                {hasWorkflowRole("exec") && report.acknowledgedByExecs.includes(currentUser.name) && (
-                  <span className="text-xs text-green-600 flex items-center gap-1"><Eye size={12} /> รับรู้แล้ว</span>
-                )}
-                <ChevronRight size={16} className="text-gray-400" />
-              </div>
-            </div>
-          ))}
+        <div className="overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)]">
+          <div className="overflow-x-auto">
+            <table className="w-full table-fixed divide-y divide-slate-200">
+              <colgroup>
+                <col className="w-[100px]" />
+                <col className="w-[150px]" />
+                <col className="w-[100px]" />
+                <col />
+                <col className="w-[96px]" />
+                <col className="w-[160px]" />
+                <col className="w-[120px]" />
+                <col className="w-[92px]" />
+              </colgroup>
+              <thead className="bg-slate-50">
+                <tr className="text-left text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-500">
+                  <th className="px-3 py-2 whitespace-nowrap">วันที่</th>
+                  <th className="px-3 py-2 whitespace-nowrap">เลขที่เอกสาร</th>
+                  <th className="px-3 py-2 whitespace-nowrap">โครงการ</th>
+                  <th className="px-3 py-2 whitespace-nowrap">หัวข้อ</th>
+                  <th className="px-3 py-2 whitespace-nowrap text-center">คนงาน</th>
+                  <th className="px-3 py-2 whitespace-nowrap">ผู้รายงาน</th>
+                  <th className="px-3 py-2 whitespace-nowrap text-center">สถานะ</th>
+                  <th className="px-3 py-2 text-right whitespace-nowrap">รายละเอียด</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {reports.map((report) => {
+                  const acknowledged = hasWorkflowRole("exec") && report.acknowledgedByExecs.includes(currentUser.name);
+                  return (
+                    <tr
+                      key={report.id}
+                      onClick={() => onSelectReport(report)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          onSelectReport(report);
+                        }
+                      }}
+                      tabIndex={0}
+                      className="cursor-pointer transition hover:bg-blue-50/70 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                    >
+                      <td className="px-3 py-2 align-middle whitespace-nowrap">
+                        <div className="flex items-center gap-1.5 text-[13px] font-medium leading-none text-slate-800 whitespace-nowrap">
+                          <Clock size={12} className="text-slate-400" />
+                          {report.date}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 align-middle whitespace-nowrap">
+                        <span className="block truncate rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-bold leading-tight text-blue-800">
+                          {getReportDocNo(report)}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 align-middle whitespace-nowrap text-[13px] text-slate-600">
+                        {report.project.slice(-4)}
+                      </td>
+                      <td className="px-3 py-2 align-middle text-[13px] font-medium text-slate-800">
+                        <span className="block truncate">{report.toolboxTopic || "-"}</span>
+                      </td>
+                      <td className="px-3 py-2 align-middle whitespace-nowrap text-center text-[13px] text-slate-600">{report.workerCount || 0}</td>
+                      <td className="px-3 py-2 align-middle text-[13px] text-slate-600 whitespace-nowrap">
+                        <span className="block truncate">{report.staffName}</span>
+                        {acknowledged && (
+                          <span className="ml-1.5 inline-flex items-center gap-1 whitespace-nowrap text-[11px] leading-none text-green-600">
+                            <Eye size={10} /> รับรู้แล้ว
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 align-middle whitespace-nowrap text-center">
+                        <StatusBadge status={report.status} compact />
+                      </td>
+                      <td className="px-3 py-2 align-middle text-right whitespace-nowrap">
+                        <span className="inline-flex items-center gap-0.5 whitespace-nowrap text-[13px] font-medium leading-none text-blue-700">
+                          ดู <ChevronRight size={14} />
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>
@@ -3600,7 +4950,7 @@ function SiteAuditDetail({
 
 // --- SUB-COMPONENTS ---
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status, compact = false }: { status: string; compact?: boolean }) {
   const styles: Record<string, string> = {
     PENDING_SITE_MGR: "bg-yellow-100 text-yellow-800 border-yellow-200",
     PENDING_CM: "bg-orange-100 text-orange-800 border-orange-200",
@@ -3614,14 +4964,22 @@ function StatusBadge({ status }: { status: string }) {
     PENDING_CMG_MGR: "รอ CMG Mgr อนุมัติ",
     APPROVED: "อนุมัติแล้ว",
   };
+  const compactLabels: Record<string, string> = {
+    PENDING_SITE_MGR: "รอ Site Mgr",
+    PENDING_CM: "รอ CM",
+    PENDING_CMG_MGR: "รอ CMG Mgr",
+    APPROVED: "อนุมัติ",
+  };
 
   return (
     <span
-      className={`text-xs px-2 py-1 rounded-full border font-medium ${
+      className={`inline-flex whitespace-nowrap rounded-full border font-medium ${
+        compact ? "px-1.5 py-0.5 text-[10px] leading-none" : "px-2 py-1 text-xs"
+      } ${
         styles[status] || "bg-gray-100 text-gray-800"
       }`}
     >
-      {labels[status] || status}
+      {(compact ? compactLabels[status] : labels[status]) || status}
     </span>
   );
 }
@@ -4022,29 +5380,37 @@ function ReportDetail({
           <h3 className="font-bold text-gray-900 mb-3 border-b pb-2">
             ผลการตรวจสอบความปลอดภัย
           </h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {CHECKLIST_ITEMS.map((item) => {
-              const status = report.checklist[item.id] || "pass";
-              const statusColors: Record<string, string> = {
-                pass: "text-green-600 bg-green-50 border-green-200",
-                warn: "text-yellow-600 bg-yellow-50 border-yellow-200",
-                fail: "text-red-600 bg-red-50 border-red-200",
-              };
-              const statusIcon: Record<string, React.ReactNode> = {
-                pass: <CheckCircle size={16} />,
-                warn: <AlertTriangle size={16} />,
-                fail: <AlertTriangle size={16} />,
-              };
-              return (
-                <div
-                  key={item.id}
-                  className={`flex items-center justify-between p-3 rounded border ${statusColors[status]}`}
-                >
-                  <span className="text-sm font-medium">{item.category}</span>
-                  {statusIcon[status]}
-                </div>
-              );
-            })}
+          <div className="overflow-x-auto pb-2">
+            <div className="flex min-w-max gap-2">
+              {CHECKLIST_ITEMS.map((item) => {
+                const status = report.checklist[item.id] || "pass";
+                const statusColors: Record<string, string> = {
+                  pass: "text-green-700 bg-green-50 border-green-200",
+                  warn: "text-yellow-700 bg-yellow-50 border-yellow-200",
+                  fail: "text-red-700 bg-red-50 border-red-200",
+                };
+                const statusIcon: Record<string, React.ReactNode> = {
+                  pass: <CheckCircle size={12} />,
+                  warn: <AlertTriangle size={12} />,
+                  fail: <AlertTriangle size={12} />,
+                };
+                const statusLabel: Record<string, string> = {
+                  pass: "ผ่าน",
+                  warn: "เฝ้าระวัง",
+                  fail: "ไม่ผ่าน",
+                };
+                return (
+                  <div
+                    key={item.id}
+                    className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-1 text-[11px] font-medium leading-none ${statusColors[status]}`}
+                    title={`${item.category}: ${statusLabel[status]}`}
+                  >
+                    {statusIcon[status]}
+                    <span className="max-w-[180px] truncate">{item.category}</span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
           {/* รูปภาพแนบรายการ 2.4 */}
           {report.checklistImages && Object.keys(report.checklistImages).length > 0 && (
@@ -4071,39 +5437,35 @@ function ReportDetail({
         </div>
 
         {/* Approval History */}
-        <div className="border-t pt-6">
-          <h3 className="font-bold text-gray-900 mb-4">ประวัติการดำเนินการ</h3>
-          <div className="space-y-4">
+        <div className="border-t pt-4">
+          <h3 className="mb-2 text-sm font-bold text-gray-900">ประวัติการดำเนินการ</h3>
+          <div className="space-y-1.5">
             {report.history.map((h: HistoryEntry, idx: number) => (
-              <div key={idx} className="flex gap-3">
-                <div className="flex flex-col items-center">
-                  <div className="w-2 h-2 rounded-full bg-blue-600 mt-2"></div>
-                  {idx !== report.history.length - 1 && (
-                    <div className="w-0.5 h-full bg-gray-200 my-1"></div>
-                  )}
-                </div>
-                <div>
-                  <div className="text-sm font-bold text-gray-800">
-                    {h.role}
+              <div
+                key={idx}
+                className="flex items-center gap-2 rounded-lg border border-gray-100 bg-gray-50 px-2.5 py-1.5 text-[11px] leading-none"
+              >
+                <div className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-blue-600"></div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 whitespace-nowrap">
+                    <span className="font-semibold text-gray-800">{h.role}</span>
+                    <span className="truncate text-gray-600">{h.action}</span>
                   </div>
-                  <div className="text-sm text-gray-600">{h.action}</div>
-                  <div className="text-xs text-gray-400">{h.time}</div>
                 </div>
+                <div className="whitespace-nowrap text-[10px] text-gray-400">{h.time}</div>
               </div>
             ))}
 
             {/* Show Exec Views */}
             {report.acknowledgedByExecs.length > 0 && (
-              <div className="flex gap-3 mt-4">
-                <div className="flex flex-col items-center">
-                  <div className="w-2 h-2 rounded-full bg-green-500 mt-2"></div>
-                </div>
-                <div>
-                  <div className="text-sm font-bold text-gray-800">
-                    ผู้บริหารรับทราบแล้ว
-                  </div>
-                  <div className="text-sm text-gray-600">
-                    {report.acknowledgedByExecs.join(", ")}
+              <div className="flex items-center gap-2 rounded-lg border border-green-100 bg-green-50 px-2.5 py-1.5 text-[11px] leading-none">
+                <div className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-green-500"></div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 whitespace-nowrap">
+                    <span className="font-semibold text-gray-800">ผู้บริหารรับทราบแล้ว</span>
+                    <span className="truncate text-gray-600">
+                      {report.acknowledgedByExecs.join(", ")}
+                    </span>
                   </div>
                 </div>
               </div>

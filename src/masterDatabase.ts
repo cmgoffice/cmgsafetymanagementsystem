@@ -73,6 +73,12 @@ function pickText(data: DocumentData, paths: string[]): string {
   return "";
 }
 
+function normalizeEmploymentStatus(status: string): string {
+  const trimmed = status.trim();
+  if (trimmed === "ทำงาน") return "ปฏิบัติงาน";
+  return trimmed;
+}
+
 function buildFullName(data: DocumentData): string {
   const directName = pickText(data, [
     "fullName",
@@ -80,8 +86,9 @@ function buildFullName(data: DocumentData): string {
     "employeeName",
     "employeeFullName",
     "nameTH",
-    "เธเธทเนเธญ-เธชเธเธธเธฅ",
-    "เธเธทเนเธญ เธชเธเธธเธฅ",
+    "ชื่อ-สกุล",
+    "ชื่อ สกุล",
+    "ชื่อเต็ม",
     "profile.fullName",
   ]);
   if (directName) return directName;
@@ -89,24 +96,24 @@ function buildFullName(data: DocumentData): string {
   const title = pickText(data, [
     "titleName",
     "prefix",
-    "เธเธทเนเธญเธ•เนเธ",
-    "เธเธณเธเธณเธซเธเนเธฒ",
+    "ชื่อต้น",
+    "คำนำหน้า",
   ]);
   const firstName = pickText(data, [
     "firstName",
     "firstname",
     "employeeFirstName",
-    "เธเธทเนเธญเธ•เธฑเธง",
-    "เธเธทเนเธญ",
+    "ชื่อตัว",
+    "ชื่อ",
     "profile.firstName",
   ]);
   const lastName = pickText(data, [
     "lastName",
     "lastname",
     "employeeLastName",
-    "เธเธทเนเธญเธชเธเธธเธฅ",
-    "เธเธฒเธกเธชเธเธธเธฅ",
-    "เธชเธเธธเธฅ",
+    "ชื่อสกุล",
+    "นามสกุล",
+    "สกุล",
     "profile.lastName",
   ]);
 
@@ -121,7 +128,7 @@ function normalizeEmployee(
     employeeCode:
       pickText(data, [
         EMPLOYEE_CODE_FIELD,
-        "เธฃเธซเธฑเธชเธเธเธฑเธเธเธฒเธ",
+        "รหัสพนักงาน",
         "employeeId",
         "empCode",
         "code",
@@ -132,36 +139,38 @@ function normalizeEmployee(
       "position",
       "jobTitle",
       "title",
-      "เธ•เธณเนเธซเธเนเธ",
-      "เธ•เธณเนเธซเธเนเธเธเธฒเธ",
+      "ตำแหน่ง",
+      "ตำแหน่งงาน",
       "profile.position",
     ]),
-    status: pickText(data, [
-      "status",
-      "employmentStatus",
-      "workStatus",
-      "เธชเธ–เธฒเธเธฐเธเธเธฑเธเธเธฒเธ",
-      "เธชเธ–เธฒเธเธฐเธเธฅเธธเนเธกเธเธฒเธ",
-      "profile.status",
-    ]),
+    status: normalizeEmploymentStatus(
+      pickText(data, [
+        "status",
+        "employmentStatus",
+        "workStatus",
+        "สถานะพนักงาน",
+        "สถานะกลุ่มงาน",
+        "profile.status",
+      ])
+    ),
     company: pickText(data, [
       "company",
       "companyName",
       "employer",
-      "เธเธฃเธดเธฉเธฑเธ—",
-      "เธ•เนเธเธชเธฑเธเธเธฑเธ”",
-      "เธซเธเนเธงเธขเธเธฒเธ",
-      "เธชเธฑเธเธเธฑเธ”",
+      "บริษัท",
+      "ต้นสังกัด",
+      "หน่วยงาน",
+      "สังกัด",
       "profile.company",
     ]),
     department: pickText(data, [
       "department",
       "dept",
       "division",
-      "เนเธเธเธ",
-      "เธเนเธฒเธข",
-      "เธชเนเธงเธเธเธฒเธ",
-      "เธซเธเนเธงเธขเธเธฒเธ",
+      "แผนก",
+      "ฝ่าย",
+      "ส่วนงาน",
+      "หน่วยงาน",
       "profile.department",
     ]),
     raw: data,

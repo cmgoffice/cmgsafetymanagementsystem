@@ -1,5 +1,5 @@
 import { initializeApp, type FirebaseApp } from "firebase/app";
-import { getAuth, type Auth } from "firebase/auth";
+import { browserLocalPersistence, getAuth, setPersistence, type Auth } from "firebase/auth";
 import { getFirestore, type Firestore } from "firebase/firestore";
 import { getStorage, type FirebaseStorage } from "firebase/storage";
 import { readAppEnv } from "./env";
@@ -66,6 +66,7 @@ let auth: Auth | null = null;
 let storage: FirebaseStorage | null = null;
 let masterApp: FirebaseApp | null = null;
 let masterDb: Firestore | null = null;
+let authPersistenceReady: Promise<void> = Promise.resolve();
 
 const hasConfig =
   firebaseConfig.apiKey &&
@@ -82,6 +83,9 @@ if (hasConfig) {
     app = initializeApp(firebaseConfig);
     db = getFirestore(app);
     auth = getAuth(app);
+    authPersistenceReady = setPersistence(auth, browserLocalPersistence).catch((err) => {
+      console.error("[Firebase] auth persistence error:", err);
+    });
     storage = getStorage(app);
   } catch (err) {
     console.error("[Firebase] init error:", err);
@@ -105,4 +109,4 @@ if (hasMasterConfig) {
   );
 }
 
-export { app, auth, db, masterApp, masterDb, storage };
+export { app, auth, authPersistenceReady, db, masterApp, masterDb, storage };
