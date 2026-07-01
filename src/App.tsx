@@ -6,6 +6,8 @@ import { seedToFirebase } from "./seedFirebase";
 import { collection, doc, getDocs } from "firebase/firestore";
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { db, storage } from "./firebase";
+import { findMasterEmployee } from "./masterDatabase";
+import type { MasterEmployeeRecord } from "./masterDatabase";
 import { useAuth } from "./auth/AuthContext";
 import { APP_NAME } from "./auth/constants";
 import {
@@ -107,14 +109,26 @@ type SiteAudit = {
   createdAt: number;
 };
 
+type UploadedFileLink = {
+  name: string;
+  url: string;
+};
+
+type CertificateExpireUnit = "day" | "year";
+
 type TrainingRecord = {
   date: string;
   institute: string;
   cer: string;
+  cerFiles: UploadedFileLink[];
+  certificateExpireValue: string;
+  certificateExpireUnit: CertificateExpireUnit;
+  remark: string;
 };
 
 type CraneTrainee = {
   id: number;
+  employeeCode?: string;
   fullName: string;
   company: string;
   position: string;
@@ -125,15 +139,17 @@ type CraneTrainee = {
   lastTrainDate: string;
   institute: string;
   cer: string;
-  round1: TrainingRecord;
-  round2: TrainingRecord;
-  round3: TrainingRecord;
+  trainingHistory: TrainingRecord[];
+  round1?: TrainingRecord;
+  round2?: TrainingRecord;
+  round3?: TrainingRecord;
   remark: string;
-  checkDate: string;
+  checkDate?: string;
 };
 
 type ConfinedSpaceTrainee = {
   id: number;
+  employeeCode?: string;
   fullName: string;
   company: string;
   position: string;
@@ -154,6 +170,7 @@ type TrainingSignIn = {
   regDate: string;
   timeSlot: string;
   seq: number;
+  employeeCode1?: string;
   fullName1: string;
   dept1: string;
   position1: string;
@@ -161,6 +178,7 @@ type TrainingSignIn = {
   link1: string;
   link2: string;
   totalCount: number;
+  employeeCode2?: string;
   fullName2: string;
   dept2: string;
   company2: string;
@@ -170,6 +188,105 @@ type TrainingSignIn = {
 };
 
 type SidebarSection = "projects" | "daily-report" | "site-audit" | "crane-register" | "confined-space-register" | "training-signin";
+type LookupFeedback = { loading: boolean; error: string; success: string };
+
+function ModalShell({
+  children,
+  onClose,
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/45 p-4">
+      <div className="absolute inset-0" aria-hidden="true" onClick={onClose} />
+      <div className="relative z-10 max-h-[calc(100vh-2rem)] w-full max-w-6xl overflow-y-auto rounded-2xl">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function EmployeeCodeLookup({
+  label = "รหัสพนักงาน",
+  value,
+  onChange,
+  onCheck,
+  loading,
+  error,
+  success,
+}: {
+  label?: string;
+  value: string;
+  onChange: (value: string) => void;
+  onCheck: () => void;
+  loading: boolean;
+  error: string;
+  success: string;
+}) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="flex-1 border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+          placeholder="กรอกรหัสพนักงาน"
+        />
+        <button
+          type="button"
+          onClick={onCheck}
+          disabled={loading}
+          className="px-4 py-2 rounded-lg bg-slate-700 text-white text-sm font-medium hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
+        >
+          {loading ? "Checking..." : "Check"}
+        </button>
+      </div>
+      {error && <p className="mt-1 text-xs text-red-600">{error}</p>}
+      {!error && success && <p className="mt-1 text-xs text-green-600">{success}</p>}
+    </div>
+  );
+}
+
+function ReadOnlyField({
+  label,
+  value,
+  type = "text",
+}: {
+  label: string;
+  value: string;
+  type?: string;
+}) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
+      <input
+        type={type}
+        value={value}
+        readOnly
+        className="w-full border border-gray-200 rounded-lg p-2 text-sm bg-gray-100 text-gray-500 cursor-not-allowed"
+        placeholder="กด Check เพื่อดึงข้อมูล"
+      />
+    </div>
+  );
+}
 
 // --- MOCK DATA & CONSTANTS ---
 
@@ -308,15 +425,237 @@ const INITIAL_AUDITS: SiteAudit[] = [
   },
 ];
 
-const EMPTY_TRAINING_RECORD: TrainingRecord = { date: "", institute: "", cer: "" };
+const EMPTY_TRAINING_RECORD: TrainingRecord = {
+  date: "",
+  institute: "",
+  cer: "",
+  cerFiles: [],
+  certificateExpireValue: "",
+  certificateExpireUnit: "day",
+  remark: "",
+};
+
+function createEmptyTrainingRecord(): TrainingRecord {
+  return { ...EMPTY_TRAINING_RECORD };
+}
+
+function formatCerSummary(record?: Partial<TrainingRecord> | null): string {
+  const fileCount = Array.isArray(record?.cerFiles) ? record?.cerFiles?.length ?? 0 : 0;
+  if (fileCount > 0) return `แนบ ${fileCount} ไฟล์`;
+  return record?.cer ?? "";
+}
+
+function normalizeTrainingRecord(record?: Partial<TrainingRecord> | null): TrainingRecord {
+  return {
+    date: record?.date ?? "",
+    institute: record?.institute ?? "",
+    cer: formatCerSummary(record),
+    cerFiles: Array.isArray(record?.cerFiles)
+      ? record.cerFiles
+        .filter((file): file is UploadedFileLink => Boolean(file?.url))
+        .map((file) => ({ name: file.name ?? file.url, url: file.url }))
+      : [],
+    certificateExpireValue:
+      record?.certificateExpireValue !== undefined && record?.certificateExpireValue !== null
+        ? String(record.certificateExpireValue)
+        : "",
+    certificateExpireUnit: record?.certificateExpireUnit === "year" ? "year" : "day",
+    remark: record?.remark ?? "",
+  };
+}
+
+function hasTrainingRecordData(record?: Partial<TrainingRecord> | null): boolean {
+  return Boolean(
+    record &&
+    [
+      record.date,
+      record.institute,
+      record.cer,
+      record.remark,
+      record.certificateExpireValue,
+      Array.isArray(record.cerFiles) ? record.cerFiles.length : 0,
+    ].some((value) => (value ?? "").toString().trim() !== "")
+  );
+}
+
+function getCertificateExpireDays(record?: Partial<TrainingRecord> | null): number | null {
+  const value = Number(record?.certificateExpireValue ?? "");
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return (record?.certificateExpireUnit ?? "day") === "year" ? value * 365 : value;
+}
+
+function toDateOnly(value?: string | null): Date | null {
+  if (!value) return null;
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) return null;
+  return new Date(year, month - 1, day);
+}
+
+function formatDateLabel(value?: string | null): string {
+  const date = toDateOnly(value);
+  if (!date) return "-";
+  return date.toLocaleDateString("en-US");
+}
+
+function getTrainingExpiryDate(record?: Partial<TrainingRecord> | null): string {
+  const trainingDate = toDateOnly(record?.date ?? "");
+  const expireDays = getCertificateExpireDays(record);
+  if (!trainingDate || expireDays === null) return "";
+  const expiryDate = new Date(trainingDate);
+  expiryDate.setDate(expiryDate.getDate() + expireDays);
+  const year = expiryDate.getFullYear();
+  const month = String(expiryDate.getMonth() + 1).padStart(2, "0");
+  const day = String(expiryDate.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function getTrainingRemainingDays(record?: Partial<TrainingRecord> | null): number | null {
+  const expiryDate = toDateOnly(getTrainingExpiryDate(record));
+  if (!expiryDate) return null;
+  const today = new Date();
+  const todayDateOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  return Math.floor((expiryDate.getTime() - todayDateOnly.getTime()) / 86400000);
+}
+
+function getTrainingExpiryStatus(record?: Partial<TrainingRecord> | null): { label: string; tone: string } | null {
+  const remainingDays = getTrainingRemainingDays(record);
+  const expiryDate = getTrainingExpiryDate(record);
+  if (remainingDays === null || !expiryDate) return null;
+  if (remainingDays < 0) {
+    return {
+      label: `หมดอายุแล้ว ${Math.abs(remainingDays)} วัน (${formatDateLabel(expiryDate)})`,
+      tone: "bg-red-100 text-red-700 border-red-200",
+    };
+  }
+  if (remainingDays <= 30) {
+    return {
+      label: `เหลือ ${remainingDays} วัน (${formatDateLabel(expiryDate)})`,
+      tone: "bg-amber-100 text-amber-800 border-amber-200",
+    };
+  }
+  return {
+    label: `เหลือ ${remainingDays} วัน (${formatDateLabel(expiryDate)})`,
+    tone: "bg-emerald-100 text-emerald-700 border-emerald-200",
+  };
+}
+
+async function uploadCraneCertificateFiles(
+  files: File[],
+  userId: string,
+  traineeId: number | string,
+  recordDate: string
+): Promise<UploadedFileLink[]> {
+  const activeStorage = storage;
+  if (!activeStorage || files.length === 0) return [];
+
+  const uploads = files.map(async (file, index) => {
+    const safeName = file.name.replace(/\s+/g, "_");
+    const path = `crane-certificates/${userId}/${traineeId}_${recordDate || "undated"}_${Date.now()}_${index}_${safeName}`;
+    const storageRef = ref(activeStorage, path);
+    await uploadBytesResumable(storageRef, file);
+    const url = await getDownloadURL(storageRef);
+    return { name: file.name, url };
+  });
+
+  return Promise.all(uploads);
+}
+
+function getCraneTrainingHistory(trainee?: Partial<CraneTrainee> | null): TrainingRecord[] {
+  const directHistory = Array.isArray(trainee?.trainingHistory) ? trainee?.trainingHistory ?? [] : [];
+  const legacyHistory = [trainee?.round1, trainee?.round2, trainee?.round3];
+  const latestTrainingFallback = [
+    {
+      date: trainee?.lastTrainDate ?? "",
+      institute: trainee?.institute ?? "",
+      cer: trainee?.cer ?? "",
+      cerFiles: [],
+      certificateExpireValue: "",
+      certificateExpireUnit: "day" as CertificateExpireUnit,
+      remark: trainee?.remark ?? "",
+    },
+  ];
+  const source = directHistory.length > 0
+    ? directHistory
+    : legacyHistory.some((record) => hasTrainingRecordData(record))
+      ? legacyHistory
+      : latestTrainingFallback;
+
+  return source
+    .map((record) => normalizeTrainingRecord(record))
+    .filter((record) => hasTrainingRecordData(record));
+}
+
+function getCraneTrainingRound(trainee: Partial<CraneTrainee>, index: number): TrainingRecord {
+  return getCraneTrainingHistory(trainee)[index] ?? createEmptyTrainingRecord();
+}
+
+const CRANE_COURSE_OPTIONS = [
+  "ผู้บังคับปั้นจั่น",
+  "ผู้ควบคุมการใช้ปั้นจั่น",
+  "ผู้ให้สัญญาณแก่ผู้บังคับปั้นจั่น",
+  "ผู้ยึดเกาะวัสดุ",
+] as const;
+
+function normalizeCraneCourseSelections(course: string): string[] {
+  const legacyCourseMap: Record<string, (typeof CRANE_COURSE_OPTIONS)[number]> = {
+    "Crane Operator": "ผู้บังคับปั้นจั่น",
+    "Crane Controller": "ผู้ควบคุมการใช้ปั้นจั่น",
+    "Signal Person": "ผู้ให้สัญญาณแก่ผู้บังคับปั้นจั่น",
+    Rigger: "ผู้ยึดเกาะวัสดุ",
+  };
+
+  const normalized = course
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => legacyCourseMap[item] || item);
+
+  return CRANE_COURSE_OPTIONS.filter((option) => normalized.includes(option));
+}
+
+function formatCraneCourseSelections(selections: string[]): string {
+  return CRANE_COURSE_OPTIONS.filter((option) => selections.includes(option)).join(", ");
+}
+
+function getCraneCourseOptionClasses(course: string, selected: boolean): string {
+  const palette: Record<string, { idle: string; active: string }> = {
+    "ผู้บังคับปั้นจั่น": {
+      idle: "border-amber-200 bg-amber-50 text-amber-900 hover:border-amber-300 hover:bg-amber-100",
+      active: "border-amber-400 bg-amber-200 text-amber-950 shadow-sm",
+    },
+    "ผู้ควบคุมการใช้ปั้นจั่น": {
+      idle: "border-sky-200 bg-sky-50 text-sky-900 hover:border-sky-300 hover:bg-sky-100",
+      active: "border-sky-400 bg-sky-200 text-sky-950 shadow-sm",
+    },
+    "ผู้ให้สัญญาณแก่ผู้บังคับปั้นจั่น": {
+      idle: "border-emerald-200 bg-emerald-50 text-emerald-900 hover:border-emerald-300 hover:bg-emerald-100",
+      active: "border-emerald-400 bg-emerald-200 text-emerald-950 shadow-sm",
+    },
+    "ผู้ยึดเกาะวัสดุ": {
+      idle: "border-rose-200 bg-rose-50 text-rose-900 hover:border-rose-300 hover:bg-rose-100",
+      active: "border-rose-400 bg-rose-200 text-rose-950 shadow-sm",
+    },
+  };
+
+  const colors = palette[course] ?? {
+    idle: "border-gray-200 bg-white text-gray-700 hover:border-yellow-300 hover:bg-yellow-50",
+    active: "border-yellow-400 bg-yellow-100 text-yellow-900 shadow-sm",
+  };
+
+  return selected ? colors.active : colors.idle;
+}
 
 const INITIAL_CRANE_TRAINEES: CraneTrainee[] = [
   {
     id: 1, fullName: "นายสมชาย ใจดี", company: "บริษัท ก่อสร้างไทย", position: "Rigger", type: "ปั้นจั่นเหนือเมียง", status: "ปฏิบัติงาน",
     project: "J-01", course: "Crane Operator", lastTrainDate: "2023-05-15", institute: "Direction Training", cer: "CR-001",
-    round1: { date: "2021-05-15", institute: "Direction Training", cer: "CR-001-1" },
-    round2: { date: "2023-05-15", institute: "Direction Training", cer: "CR-001-2" },
-    round3: EMPTY_TRAINING_RECORD,
+    trainingHistory: [
+      { date: "2021-05-15", institute: "Direction Training", cer: "CR-001-1", cerFiles: [], certificateExpireValue: "365", certificateExpireUnit: "day", remark: "" },
+      { date: "2023-05-15", institute: "Direction Training", cer: "CR-001-2", cerFiles: [], certificateExpireValue: "1", certificateExpireUnit: "year", remark: "" },
+    ],
+    round1: { date: "2021-05-15", institute: "Direction Training", cer: "CR-001-1", cerFiles: [], certificateExpireValue: "365", certificateExpireUnit: "day", remark: "" },
+    round2: { date: "2023-05-15", institute: "Direction Training", cer: "CR-001-2", cerFiles: [], certificateExpireValue: "1", certificateExpireUnit: "year", remark: "" },
+    round3: createEmptyTrainingRecord(),
     remark: "", checkDate: "2024-01-10",
   },
 ];
@@ -325,7 +664,7 @@ const INITIAL_CONFINED_TRAINEES: ConfinedSpaceTrainee[] = [
   {
     id: 1, fullName: "นายวิชัย สุขใจ", company: "บริษัท โครงสร้างเหล็ก", position: "Supervisor", type: "ทำงานอยู่", status: "ปฏิบัติงาน",
     project: "J-02", course: "Confined Space Safety", lastTrainDate: "2022-11-05", institute: "Direction Training", cer: "CS-001",
-    renewal3yr: { date: "2025-11-05", institute: "", cer: "" },
+    renewal3yr: { date: "2025-11-05", institute: "", cer: "", cerFiles: [], certificateExpireValue: "", certificateExpireUnit: "day", remark: "" },
     remark: "", checkDate: "2024-01-10",
   },
 ];
@@ -363,7 +702,7 @@ export default function App() {
   }, [userProfile, workflowRoles]);
 
   // Sidebar
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeSection, setActiveSection] = useState<SidebarSection>("daily-report");
 
   // Daily Report state — Firestore
@@ -754,22 +1093,22 @@ export default function App() {
           {/* ===== CRANE REGISTER SECTION ===== */}
           {activeSection === "crane-register" && (
             <>
-              {craneView === "list" && (
-                <CraneRegisterList
-                  trainees={craneTrainees}
-                  onAdd={() => { setEditingCrane(null); setCraneView("form"); }}
-                  onEdit={(t: CraneTrainee) => { setEditingCrane(t); setCraneView("form"); }}
-                  onDelete={handleDeleteCrane}
-                  onImport={(rows: CraneTrainee[]) => rows.forEach((r) => saveCraneFS(r.id === 0 ? { ...r, id: Date.now() } : r))}
-                />
-              )}
+              <CraneRegisterList
+                trainees={craneTrainees}
+                onAdd={() => { setEditingCrane(null); setCraneView("form"); }}
+                onEdit={(t: CraneTrainee) => { setEditingCrane(t); setCraneView("form"); }}
+                onDelete={handleDeleteCrane}
+                onImport={(rows: CraneTrainee[]) => rows.forEach((r) => saveCraneFS(r.id === 0 ? { ...r, id: Date.now() } : r))}
+              />
               {craneView === "form" && (
-                <CraneTraineeForm
-                  trainee={editingCrane}
-                  projectCodes={projectCodes}
-                  onCancel={() => { setCraneView("list"); setEditingCrane(null); }}
-                  onSave={handleSaveCrane}
-                />
+                <ModalShell onClose={() => { setCraneView("list"); setEditingCrane(null); }}>
+                  <CraneTraineeForm
+                    trainee={editingCrane}
+                    projectCodes={projectCodes}
+                    onCancel={() => { setCraneView("list"); setEditingCrane(null); }}
+                    onSave={handleSaveCrane}
+                  />
+                </ModalShell>
               )}
             </>
           )}
@@ -959,18 +1298,22 @@ function TrainingSignInList({
   };
 
   return (
-    <div>
-      <div className="flex flex-wrap justify-between items-center mb-5 gap-3">
-        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+    <div className="space-y-5">
+      <div className="space-y-1">
+        <h2 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
           <ClipboardCheck className="text-blue-600" size={22} />
           CMG — ใบลงชื่อเข้ารับการอบรม
         </h2>
+        <div className="text-sm text-slate-500">เธ—เธฑเนเธเธซเธกเธ” {records.length} เธฃเธฒเธขเธเธฒเธฃ {search && `(เธเธฃเธญเธเนเธฅเนเธง ${filtered.length} เธฃเธฒเธขเธเธฒเธฃ)`}</div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-[24px] p-4 sm:p-5 shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)] space-y-4">
         <div className="flex flex-wrap gap-2">
           <div className="relative" ref={columnPopupRef}>
             <button
               type="button"
               onClick={() => setColumnPopupOpen((o) => !o)}
-              className="flex items-center gap-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300 px-3 py-2 rounded-lg text-sm font-medium transition"
+              className="flex items-center gap-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 px-3.5 py-2.5 rounded-xl text-sm font-medium transition"
             >
               <Columns size={15} /> แสดง/ซ่อน คอลัมน์ <ChevronDown size={14} />
             </button>
@@ -992,29 +1335,29 @@ function TrainingSignInList({
             )}
           </div>
           <button onClick={handleExportTemplate}
-            className="flex items-center gap-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300 px-3 py-2 rounded-lg text-sm font-medium transition">
+            className="flex items-center gap-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 px-3.5 py-2.5 rounded-xl text-sm font-medium transition">
             <FileDown size={15} /> ดาวน์โหลด Template
           </button>
-          <label className="flex items-center gap-1.5 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded-lg text-sm font-medium shadow-sm transition cursor-pointer">
+          <label className="flex items-center gap-1.5 bg-green-600 hover:bg-green-700 text-white px-3.5 py-2.5 rounded-xl text-sm font-medium shadow-sm transition cursor-pointer">
             <Upload size={15} /> Import Excel
             <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImport} />
           </label>
           <button onClick={handleExport}
-            className="flex items-center gap-1.5 bg-emerald-500 hover:bg-emerald-600 text-white px-3 py-2 rounded-lg text-sm font-medium shadow-sm transition">
+            className="flex items-center gap-1.5 bg-emerald-500 hover:bg-emerald-600 text-white px-3.5 py-2.5 rounded-xl text-sm font-medium shadow-sm transition">
             <Download size={15} /> Export Excel
           </button>
           <button onClick={onAdd}
-            className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg text-sm font-medium shadow-sm transition">
+            className="flex items-center gap-1.5 bg-[#183b6b] hover:bg-[#122f55] text-white px-3.5 py-2.5 rounded-xl text-sm font-medium shadow-sm transition">
             <Plus size={15} /> เพิ่มรายการ
           </button>
         </div>
       </div>
 
-      <div className="relative mb-4">
-        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+      <div className="relative">
+        <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
         <input type="text" placeholder="ค้นหาชื่อ, บริษัท, วันที่..."
           value={search} onChange={(e) => setSearch(e.target.value)}
-          className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+          className="w-full pl-11 pr-4 py-3 border border-slate-200 rounded-2xl text-sm bg-slate-50/70 focus:outline-none focus:ring-2 focus:ring-blue-400" />
       </div>
 
       <div className="text-xs text-gray-400 mb-2">ทั้งหมด {records.length} รายการ {search && `(กรองแล้ว ${filtered.length} รายการ)`}</div>
@@ -1074,6 +1417,8 @@ function TrainingSignInList({
 }
 
 const EMPTY_TRAINING_SIGNIN: TrainingSignIn = {
+  employeeCode1: "",
+  employeeCode2: "",
   id: 0, regDate: "", timeSlot: "08:00 am - 18:00 pm", seq: 1,
   fullName1: "", dept1: "", position1: "", company1: "", link1: "", link2: "",
   totalCount: 0,
@@ -1090,9 +1435,121 @@ function TrainingSignInForm({
   onCancel: () => void;
   onSave: (r: TrainingSignIn) => void;
 }) {
-  const [form, setForm] = useState<TrainingSignIn>(record ?? EMPTY_TRAINING_SIGNIN);
+  const [form, setForm] = useState<TrainingSignIn>({
+    ...EMPTY_TRAINING_SIGNIN,
+    ...(record ?? {}),
+    employeeCode1: record?.employeeCode1 ?? "",
+    employeeCode2: record?.employeeCode2 ?? "",
+  });
+  const [employeeCode1, setEmployeeCode1] = useState(record?.employeeCode1 ?? "");
+  const [employeeCode2, setEmployeeCode2] = useState(record?.employeeCode2 ?? "");
+  const [lookup1, setLookup1] = useState<LookupFeedback>({ loading: false, error: "", success: "" });
+  const [lookup2, setLookup2] = useState<LookupFeedback>({ loading: false, error: "", success: "" });
+
   const set = (field: keyof TrainingSignIn, val: string | number) =>
     setForm((prev) => ({ ...prev, [field]: val }));
+
+  const handleEmployeeCode1Change = (value: string) => {
+    setEmployeeCode1(value);
+    setLookup1({ loading: false, error: "", success: "" });
+    setForm((prev) => ({
+      ...prev,
+      employeeCode1: value,
+      fullName1: "",
+      dept1: "",
+      position1: "",
+      company1: "",
+    }));
+  };
+
+  const handleEmployeeCode2Change = (value: string) => {
+    setEmployeeCode2(value);
+    setLookup2({ loading: false, error: "", success: "" });
+    setForm((prev) => ({
+      ...prev,
+      employeeCode2: value,
+      fullName2: "",
+      dept2: "",
+      company2: "",
+    }));
+  };
+
+  const applyEmployeeToPerson1 = (employee: MasterEmployeeRecord | null, code: string) => {
+    setForm((prev) => ({
+      ...prev,
+      employeeCode1: code,
+      fullName1: employee?.fullName || "",
+      dept1: employee?.department || "",
+      position1: employee?.position || "",
+      company1: employee?.company || "",
+    }));
+  };
+
+  const applyEmployeeToPerson2 = (employee: MasterEmployeeRecord | null, code: string) => {
+    setForm((prev) => ({
+      ...prev,
+      employeeCode2: code,
+      fullName2: employee?.fullName || "",
+      dept2: employee?.department || "",
+      company2: employee?.company || "",
+    }));
+  };
+
+  const handleLookup1 = async () => {
+    const code = employeeCode1.trim();
+    if (!code) {
+      setLookup1({ loading: false, error: "กรุณากรอกรหัสพนักงาน", success: "" });
+      applyEmployeeToPerson1(null, "");
+      return;
+    }
+
+    setLookup1({ loading: true, error: "", success: "" });
+    try {
+      const employee = await findMasterEmployee(code);
+      if (!employee) {
+        applyEmployeeToPerson1(null, code);
+        setLookup1({ loading: false, error: "ไม่พบข้อมูลพนักงานจาก MasterDatabase", success: "" });
+        return;
+      }
+      applyEmployeeToPerson1(employee, code);
+      setLookup1({ loading: false, error: "", success: "พบข้อมูลพนักงานแล้ว" });
+    } catch (error) {
+      applyEmployeeToPerson1(null, code);
+      setLookup1({
+        loading: false,
+        error: error instanceof Error ? error.message : "ไม่สามารถเชื่อมต่อ MasterDatabase ได้",
+        success: "",
+      });
+    }
+  };
+
+  const handleLookup2 = async () => {
+    const code = employeeCode2.trim();
+    if (!code) {
+      setLookup2({ loading: false, error: "กรุณากรอกรหัสพนักงาน", success: "" });
+      applyEmployeeToPerson2(null, "");
+      return;
+    }
+
+    setLookup2({ loading: true, error: "", success: "" });
+    try {
+      const employee = await findMasterEmployee(code);
+      if (!employee) {
+        applyEmployeeToPerson2(null, code);
+        setLookup2({ loading: false, error: "ไม่พบข้อมูลพนักงานจาก MasterDatabase", success: "" });
+        return;
+      }
+      applyEmployeeToPerson2(employee, code);
+      setLookup2({ loading: false, error: "", success: "พบข้อมูลพนักงานแล้ว" });
+    } catch (error) {
+      applyEmployeeToPerson2(null, code);
+      setLookup2({
+        loading: false,
+        error: error instanceof Error ? error.message : "ไม่สามารถเชื่อมต่อ MasterDatabase ได้",
+        success: "",
+      });
+    }
+  };
 
   const txt = (label: string, field: keyof TrainingSignIn, type = "text") => (
     <div>
@@ -1102,6 +1559,23 @@ function TrainingSignInForm({
         className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
     </div>
   );
+
+  const handleSave = () => {
+    if (!form.fullName1.trim()) {
+      alert("กรุณากรอกรหัสพนักงานคนที่ 1 และกด Check");
+      return;
+    }
+    if (employeeCode2.trim() && !form.fullName2.trim()) {
+      alert("กรุณากด Check สำหรับรหัสพนักงานคนที่ 2");
+      return;
+    }
+
+    onSave({
+      ...form,
+      employeeCode1: employeeCode1.trim(),
+      employeeCode2: employeeCode2.trim(),
+    });
+  };
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
@@ -1114,7 +1588,6 @@ function TrainingSignInForm({
       </div>
 
       <div className="p-6 space-y-6">
-        {/* General Info */}
         <div>
           <h3 className="text-sm font-bold text-gray-700 mb-3 border-b pb-1">ข้อมูลทั่วไป</h3>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1136,27 +1609,40 @@ function TrainingSignInForm({
           </div>
         </div>
 
-        {/* Person 1 */}
         <div>
           <h3 className="text-sm font-bold text-blue-700 mb-3 border-b border-blue-100 pb-1">ข้อมูลผู้อบรม คนที่ 1</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {txt("ชื่อ-นามสกุล", "fullName1")}
-            {txt("สังกัด", "dept1")}
-            {txt("ตำแหน่ง", "position1")}
-            {txt("บริษัท", "company1")}
+            <EmployeeCodeLookup
+              value={employeeCode1}
+              onChange={handleEmployeeCode1Change}
+              onCheck={handleLookup1}
+              loading={lookup1.loading}
+              error={lookup1.error}
+              success={lookup1.success}
+            />
+            <ReadOnlyField label="ชื่อ-นามสกุล" value={form.fullName1} />
+            <ReadOnlyField label="สังกัด" value={form.dept1} />
+            <ReadOnlyField label="ตำแหน่ง" value={form.position1} />
+            <ReadOnlyField label="บริษัท" value={form.company1} />
             {txt("Link ใบลงชื่อ (Google Drive)", "link1")}
             {txt("Link ใบรับรอง (Google Drive)", "link2")}
           </div>
         </div>
 
-        {/* Person 2 */}
         <div>
           <h3 className="text-sm font-bold text-indigo-700 mb-3 border-b border-indigo-100 pb-1">ข้อมูลผู้อบรม คนที่ 2</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {txt("ชื่อ-นามสกุล", "fullName2")}
-            {txt("สังกัด", "dept2")}
-            {txt("บริษัท", "company2")}
-            <div />
+            <EmployeeCodeLookup
+              value={employeeCode2}
+              onChange={handleEmployeeCode2Change}
+              onCheck={handleLookup2}
+              loading={lookup2.loading}
+              error={lookup2.error}
+              success={lookup2.success}
+            />
+            <ReadOnlyField label="ชื่อ-นามสกุล" value={form.fullName2} />
+            <ReadOnlyField label="สังกัด" value={form.dept2} />
+            <ReadOnlyField label="บริษัท" value={form.company2} />
             {txt("Link ใบลงชื่อ (Google Drive)", "link3")}
             {txt("Link ใบรับรอง (Google Drive)", "link4")}
           </div>
@@ -1165,7 +1651,7 @@ function TrainingSignInForm({
 
       <div className="bg-gray-50 p-4 border-t border-gray-100 flex justify-end gap-3">
         <button onClick={onCancel} className="px-4 py-2 text-gray-600 font-medium hover:bg-gray-100 rounded-lg text-sm">ยกเลิก</button>
-        <button onClick={() => onSave(form)}
+        <button onClick={handleSave}
           className="px-6 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 shadow-sm transition text-sm">
           บันทึก
         </button>
@@ -1178,40 +1664,117 @@ function TrainingSignInForm({
 // CRANE REGISTER COMPONENTS
 // ============================================================
 
-const CRANE_COLUMNS = [
+const CRANE_BASE_COLUMNS = [
   "ชื่อ-สกุล", "ต้นสังกัด", "ตำแหน่ง", "ประเภทปั้นจั่น", "สถานะ", "โครงการ", "หลักสูตร",
   "วันที่อบรมล่าสุด", "สถาบันอบรม", "CER.",
-  "อบรมครั้งที่1_วันที่", "อบรมครั้งที่1_สถาบัน", "อบรมครั้งที่1_CER",
-  "อบรมครั้งที่2_วันที่", "อบรมครั้งที่2_สถาบัน", "อบรมครั้งที่2_CER",
-  "อบรมครั้งที่3_วันที่", "อบรมครั้งที่3_สถาบัน", "อบรมครั้งที่3_CER",
+];
+
+const CRANE_TRAILING_COLUMNS = [
   "หมายเหตุ", "วันที่เช็ค",
 ];
 
+function getCraneHistoryColumns(historyCount: number): string[] {
+  return Array.from({ length: Math.max(1, historyCount) }, (_, index) => {
+    const round = index + 1;
+    return [
+      `อบรมครั้งที่${round}_วันที่`,
+      `อบรมครั้งที่${round}_สถาบัน`,
+      `อบรมครั้งที่${round}_CER`,
+      `อบรมครั้งที่${round}_CERไฟล์`,
+      `อบรมครั้งที่${round}_CertificateExpire`,
+      `อบรมครั้งที่${round}_CertificateExpireUnit`,
+      `อบรมครั้งที่${round}_วันหมดอายุ`,
+      `อบรมครั้งที่${round}_คงเหลือวัน`,
+      `อบรมครั้งที่${round}_หมายเหตุ`,
+    ];
+  }).flat();
+}
+
+function getCraneExportColumns(historyCount: number): string[] {
+  return [...CRANE_BASE_COLUMNS, ...getCraneHistoryColumns(historyCount), ...CRANE_TRAILING_COLUMNS];
+}
+
 function craneToRow(t: CraneTrainee): Record<string, string> {
-  return {
-    "ชื่อ-สกุล": t.fullName, "ต้นสังกัด": t.company, "ตำแหน่ง": t.position,
-    "ประเภทปั้นจั่น": t.type, "สถานะ": t.status, "โครงการ": t.project, "หลักสูตร": t.course,
-    "วันที่อบรมล่าสุด": t.lastTrainDate, "สถาบันอบรม": t.institute, "CER.": t.cer,
-    "อบรมครั้งที่1_วันที่": t.round1.date, "อบรมครั้งที่1_สถาบัน": t.round1.institute, "อบรมครั้งที่1_CER": t.round1.cer,
-    "อบรมครั้งที่2_วันที่": t.round2.date, "อบรมครั้งที่2_สถาบัน": t.round2.institute, "อบรมครั้งที่2_CER": t.round2.cer,
-    "อบรมครั้งที่3_วันที่": t.round3.date, "อบรมครั้งที่3_สถาบัน": t.round3.institute, "อบรมครั้งที่3_CER": t.round3.cer,
-    "หมายเหตุ": t.remark, "วันที่เช็ค": t.checkDate,
+  const trainingHistory = getCraneTrainingHistory(t);
+  const row: Record<string, string> = {
+    "ชื่อ-สกุล": t.fullName,
+    "ต้นสังกัด": t.company,
+    "ตำแหน่ง": t.position,
+    "ประเภทปั้นจั่น": t.type,
+    "สถานะ": t.status,
+    "โครงการ": t.project,
+    "หลักสูตร": t.course,
+    "วันที่อบรมล่าสุด": t.lastTrainDate,
+    "สถาบันอบรม": t.institute,
+    "CER.": t.cer,
+    "หมายเหตุ": t.remark,
+    "วันที่เช็ค": t.checkDate || "",
   };
+
+  trainingHistory.forEach((record, index) => {
+    const round = index + 1;
+    row[`อบรมครั้งที่${round}_วันที่`] = record.date;
+    row[`อบรมครั้งที่${round}_สถาบัน`] = record.institute;
+    row[`อบรมครั้งที่${round}_CER`] = formatCerSummary(record);
+    row[`อบรมครั้งที่${round}_CERไฟล์`] = record.cerFiles.map((file) => `${file.name}|${file.url}`).join("\n");
+    row[`อบรมครั้งที่${round}_CertificateExpire`] = record.certificateExpireValue;
+    row[`อบรมครั้งที่${round}_CertificateExpireUnit`] = record.certificateExpireUnit === "year" ? "ปี" : "วัน";
+    row[`อบรมครั้งที่${round}_วันหมดอายุ`] = getTrainingExpiryDate(record);
+    row[`อบรมครั้งที่${round}_คงเหลือวัน`] = getTrainingRemainingDays(record)?.toString() ?? "";
+    row[`อบรมครั้งที่${round}_หมายเหตุ`] = record.remark;
+  });
+
+  return row;
 }
 
 function rowToCrane(row: Record<string, string>, id: number): CraneTrainee {
-  return {
+  const historyIndexes = Array.from(
+    new Set(
+      Object.keys(row)
+        .map((key) => key.match(/^อบรมครั้งที่(\d+)_/))
+        .filter((match): match is RegExpMatchArray => Boolean(match))
+        .map((match) => Number(match[1]))
+        .filter((index) => Number.isInteger(index) && index > 0)
+    )
+  ).sort((a, b) => a - b);
+
+  const fallbackIndexes = historyIndexes.length > 0 ? historyIndexes : [1, 2, 3];
+
+  const trainingHistory = fallbackIndexes
+    .map((index) => ({
+      date: row[`อบรมครั้งที่${index}_วันที่`] || "",
+      institute: row[`อบรมครั้งที่${index}_สถาบัน`] || "",
+      cer: row[`อบรมครั้งที่${index}_CER`] || "",
+      cerFiles: (row[`อบรมครั้งที่${index}_CERไฟล์`] || "")
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => {
+          const [name, ...urlParts] = item.split("|");
+          const url = urlParts.join("|");
+          return { name: name || url, url: url || name };
+        })
+        .filter((file) => Boolean(file.url)),
+      certificateExpireValue: row[`อบรมครั้งที่${index}_CertificateExpire`] || "",
+      certificateExpireUnit: (["ปี", "year"].includes((row[`อบรมครั้งที่${index}_CertificateExpireUnit`] || "").toLowerCase()) ? "year" : "day") as CertificateExpireUnit,
+      remark: row[`อบรมครั้งที่${index}_หมายเหตุ`] || "",
+    }))
+    .map((record) => normalizeTrainingRecord(record))
+    .filter((record) => hasTrainingRecordData(record));
+
+  return syncCraneTrainingHistory({
     id,
     fullName: row["ชื่อ-สกุล"] || "", company: row["ต้นสังกัด"] || "",
     position: row["ตำแหน่ง"] || "", type: row["ประเภทปั้นจั่น"] || "",
     status: row["สถานะ"] || "ปฏิบัติงาน", project: row["โครงการ"] || "",
     course: row["หลักสูตร"] || "", lastTrainDate: row["วันที่อบรมล่าสุด"] || "",
     institute: row["สถาบันอบรม"] || "", cer: row["CER."] || "",
-    round1: { date: row["อบรมครั้งที่1_วันที่"] || "", institute: row["อบรมครั้งที่1_สถาบัน"] || "", cer: row["อบรมครั้งที่1_CER"] || "" },
-    round2: { date: row["อบรมครั้งที่2_วันที่"] || "", institute: row["อบรมครั้งที่2_สถาบัน"] || "", cer: row["อบรมครั้งที่2_CER"] || "" },
-    round3: { date: row["อบรมครั้งที่3_วันที่"] || "", institute: row["อบรมครั้งที่3_สถาบัน"] || "", cer: row["อบรมครั้งที่3_CER"] || "" },
+    trainingHistory,
+    round1: trainingHistory[0] || createEmptyTrainingRecord(),
+    round2: trainingHistory[1] || createEmptyTrainingRecord(),
+    round3: trainingHistory[2] || createEmptyTrainingRecord(),
     remark: row["หมายเหตุ"] || "", checkDate: row["วันที่เช็ค"] || "",
-  };
+  }, trainingHistory);
 }
 
 const CRANE_TABLE_COLUMNS: { key: string; label: string }[] = [
@@ -1268,9 +1831,10 @@ function CraneRegisterList({
       t.project.toLowerCase().includes(search.toLowerCase()) ||
       t.company.toLowerCase().includes(search.toLowerCase())
   );
+  const maxHistoryCount = Math.max(1, ...trainees.map((t) => getCraneTrainingHistory(t).length));
 
   const handleExportTemplate = () => {
-    const ws = XLSX.utils.aoa_to_sheet([CRANE_COLUMNS]);
+    const ws = XLSX.utils.aoa_to_sheet([getCraneExportColumns(maxHistoryCount)]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Template");
     XLSX.writeFile(wb, "template_crane_register.xlsx");
@@ -1278,7 +1842,7 @@ function CraneRegisterList({
 
   const handleExport = () => {
     const rows = trainees.map(craneToRow);
-    const ws = XLSX.utils.json_to_sheet(rows, { header: CRANE_COLUMNS });
+    const ws = XLSX.utils.json_to_sheet(rows, { header: getCraneExportColumns(maxHistoryCount) });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "ทะเบียนปั้นจั่น");
     XLSX.writeFile(wb, "crane_register.xlsx");
@@ -1303,10 +1867,13 @@ function CraneRegisterList({
   return (
     <div>
       <div className="flex flex-wrap justify-between items-center mb-5 gap-3">
-        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+        <div className="space-y-1">
+        <h2 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
           <HardHat className="text-yellow-500" size={22} />
           ทะเบียนรายชื่อผู้อบรมปั้นจั่น (Crane)
         </h2>
+        <div className="text-sm text-slate-500">ทั้งหมด {filtered.length} โครงการ</div>
+        </div>
         <div className="flex flex-wrap gap-2">
           <div className="relative" ref={columnPopupRef}>
             <button
@@ -1352,11 +1919,13 @@ function CraneRegisterList({
         </div>
       </div>
 
-      <div className="relative mb-4">
-        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+      <div className="bg-white border border-slate-200 rounded-[24px] p-4 sm:p-5 shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)]">
+        <div className="relative">
+          <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
         <input type="text" placeholder="ค้นหาชื่อ, โครงการ, บริษัท..."
           value={search} onChange={(e) => setSearch(e.target.value)}
           className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400" />
+        </div>
       </div>
 
       <div className="text-xs text-gray-400 mb-2">ทั้งหมด {trainees.length} รายการ {search && `(กรองแล้ว ${filtered.length} รายการ)`}</div>
@@ -1377,35 +1946,43 @@ function CraneRegisterList({
             </thead>
             <tbody>
               {filtered.map((t, idx) => (
-                <tr key={t.id} className={idx % 2 === 0 ? "bg-yellow-50" : "bg-white"}>
-                  <td className="px-3 py-2 text-gray-500">{idx + 1}</td>
-                  {CRANE_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((col) => (
-                    <td key={col.key} className="px-3 py-2 text-gray-600 whitespace-nowrap">
-                      {col.key === "fullName" && <span className="font-medium text-gray-800">{t.fullName}</span>}
-                      {col.key === "company" && t.company}
-                      {col.key === "position" && t.position}
-                      {col.key === "type" && t.type}
-                      {col.key === "status" && (
-                        <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 border border-green-200">{t.status}</span>
-                      )}
-                      {col.key === "project" && t.project}
-                      {col.key === "lastTrainDate" && t.lastTrainDate}
-                      {col.key === "institute" && t.institute}
-                      {col.key === "cer" && t.cer}
-                      {col.key === "round1" && (t.round1.date || "-")}
-                      {col.key === "round2" && (t.round2.date || "-")}
-                      {col.key === "round3" && (t.round3.date || "-")}
-                      {col.key === "remark" && t.remark}
-                      {col.key === "checkDate" && t.checkDate}
-                    </td>
-                  ))}
-                  <td className="px-3 py-2">
-                    <div className="flex gap-1">
-                      <button onClick={() => onEdit(t)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition" title="แก้ไข"><Pencil size={14} /></button>
-                      <button onClick={() => onDelete(t.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded transition" title="ลบ"><Trash2 size={14} /></button>
-                    </div>
-                  </td>
-                </tr>
+                (() => {
+                  const round1 = getCraneTrainingRound(t, 0);
+                  const round2 = getCraneTrainingRound(t, 1);
+                  const round3 = getCraneTrainingRound(t, 2);
+
+                  return (
+                    <tr key={t.id} className={idx % 2 === 0 ? "bg-yellow-50" : "bg-white"}>
+                      <td className="px-3 py-2 text-gray-500">{idx + 1}</td>
+                      {CRANE_TABLE_COLUMNS.filter((c) => visibleColumns[c.key] !== false).map((col) => (
+                        <td key={col.key} className="px-3 py-2 text-gray-600 whitespace-nowrap">
+                          {col.key === "fullName" && <span className="font-medium text-gray-800">{t.fullName}</span>}
+                          {col.key === "company" && t.company}
+                          {col.key === "position" && t.position}
+                          {col.key === "type" && t.type}
+                          {col.key === "status" && (
+                            <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 border border-green-200">{t.status}</span>
+                          )}
+                          {col.key === "project" && t.project}
+                          {col.key === "lastTrainDate" && t.lastTrainDate}
+                          {col.key === "institute" && t.institute}
+                          {col.key === "cer" && t.cer}
+                          {col.key === "round1" && (round1.date || "-")}
+                          {col.key === "round2" && (round2.date || "-")}
+                          {col.key === "round3" && (round3.date || "-")}
+                          {col.key === "remark" && t.remark}
+                          {col.key === "checkDate" && t.checkDate}
+                        </td>
+                      ))}
+                      <td className="px-3 py-2">
+                        <div className="flex gap-1">
+                          <button onClick={() => onEdit(t)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition" title="แก้ไข"><Pencil size={14} /></button>
+                          <button onClick={() => onDelete(t.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded transition" title="ลบ"><Trash2 size={14} /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })()
               ))}
             </tbody>
           </table>
@@ -1416,13 +1993,249 @@ function CraneRegisterList({
 }
 
 const EMPTY_CRANE_TRAINEE: CraneTrainee = {
+  employeeCode: "",
   id: 0, fullName: "", company: "", position: "", type: "", status: "ปฏิบัติงาน",
   project: "", course: "", lastTrainDate: "", institute: "", cer: "",
-  round1: { date: "", institute: "", cer: "" },
-  round2: { date: "", institute: "", cer: "" },
-  round3: { date: "", institute: "", cer: "" },
+  trainingHistory: [],
+  round1: createEmptyTrainingRecord(),
+  round2: createEmptyTrainingRecord(),
+  round3: createEmptyTrainingRecord(),
   remark: "", checkDate: "",
 };
+function syncCraneTrainingHistory(trainee: CraneTrainee, history: TrainingRecord[]): CraneTrainee {
+  const normalizedHistory = history
+    .map((record) => normalizeTrainingRecord(record))
+    .filter((record) => hasTrainingRecordData(record));
+  const latestRecord = normalizedHistory[normalizedHistory.length - 1];
+
+  return {
+    ...trainee,
+    lastTrainDate: latestRecord?.date ?? "",
+    institute: latestRecord?.institute ?? "",
+    cer: latestRecord ? formatCerSummary(latestRecord) : "",
+    remark: latestRecord?.remark ?? "",
+    trainingHistory: normalizedHistory,
+    round1: normalizedHistory[0] ?? createEmptyTrainingRecord(),
+    round2: normalizedHistory[1] ?? createEmptyTrainingRecord(),
+    round3: normalizedHistory[2] ?? createEmptyTrainingRecord(),
+  };
+}
+
+function normalizeCraneTrainee(trainee: CraneTrainee | null): CraneTrainee {
+  return syncCraneTrainingHistory(
+    {
+      ...EMPTY_CRANE_TRAINEE,
+      ...(trainee ?? {}),
+      employeeCode: trainee?.employeeCode ?? "",
+      checkDate: trainee?.checkDate ?? "",
+    },
+    getCraneTrainingHistory(trainee)
+  );
+}
+
+function CraneTrainingHistoryModal({
+  title,
+  record,
+  traineeKey,
+  onClose,
+  onSave,
+}: {
+  title: string;
+  record: TrainingRecord;
+  traineeKey: string;
+  onClose: () => void;
+  onSave: (record: TrainingRecord) => void;
+}) {
+  const [form, setForm] = useState<TrainingRecord>(normalizeTrainingRecord(record));
+  const [uploading, setUploading] = useState(false);
+  const { firebaseUser } = useAuth();
+  const expiryStatus = getTrainingExpiryStatus(form);
+  const expiryDate = getTrainingExpiryDate(form);
+  const expireDays = getCertificateExpireDays(form);
+
+  const set = (field: keyof TrainingRecord, value: string) =>
+    setForm((prev) => ({ ...prev, [field]: value }));
+
+  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    if (!files.length) return;
+    if (!firebaseUser?.uid || !storage) {
+      alert("ไม่สามารถอัปโหลดไฟล์ได้ในขณะนี้");
+      event.target.value = "";
+      return;
+    }
+
+    setUploading(true);
+    try {
+      const uploadedFiles = await uploadCraneCertificateFiles(files, firebaseUser.uid, traineeKey, form.date);
+      setForm((prev) => {
+        const nextFiles = [...prev.cerFiles, ...uploadedFiles];
+        return {
+          ...prev,
+          cerFiles: nextFiles,
+          cer: nextFiles.length > 0 ? `แนบ ${nextFiles.length} ไฟล์` : "",
+        };
+      });
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "อัปโหลดไฟล์ไม่สำเร็จ");
+    } finally {
+      setUploading(false);
+      event.target.value = "";
+    }
+  };
+
+  const removeCerFile = (index: number) => {
+    setForm((prev) => {
+      const nextFiles = prev.cerFiles.filter((_, fileIndex) => fileIndex !== index);
+      return {
+        ...prev,
+        cerFiles: nextFiles,
+        cer: nextFiles.length > 0 ? `แนบ ${nextFiles.length} ไฟล์` : "",
+      };
+    });
+  };
+
+  const handleSave = () => {
+    if (!form.date.trim()) {
+      alert("กรุณากรอกวันที่อบรมล่าสุด");
+      return;
+    }
+
+    onSave(normalizeTrainingRecord({
+      ...form,
+      cer: form.cerFiles.length > 0 ? `แนบ ${form.cerFiles.length} ไฟล์` : form.cer,
+    }));
+  };
+
+  return (
+    <ModalShell onClose={onClose}>
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden max-w-2xl mx-auto">
+        <div className="bg-yellow-50 p-4 border-b border-yellow-100 flex justify-between items-center">
+          <h3 className="font-bold text-yellow-900 text-lg">{title}</h3>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-700"><X size={20} /></button>
+        </div>
+
+        <div className="p-6 space-y-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">วันที่อบรมล่าสุด</label>
+              <input
+                type="date"
+                value={form.date}
+                onChange={(e) => set("date", e.target.value)}
+                className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
+              />
+              <p className="mt-1 text-[11px] text-gray-400">mm/dd/yyyy</p>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">สถาบันอบรม</label>
+              <input
+                type="text"
+                value={form.institute}
+                onChange={(e) => set("institute", e.target.value)}
+                className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Certificate Expire</label>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  value={form.certificateExpireValue}
+                  onChange={(e) => set("certificateExpireValue", e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                  placeholder="เช่น 1 หรือ 365"
+                />
+                <select
+                  value={form.certificateExpireUnit}
+                  onChange={(e) => setForm((prev) => ({ ...prev, certificateExpireUnit: e.target.value as CertificateExpireUnit }))}
+                  className="w-32 border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                >
+                  <option value="day">วัน</option>
+                  <option value="year">ปี</option>
+                </select>
+              </div>
+              <p className="mt-1 text-[11px] text-gray-400">
+                {expireDays === null ? "ยังไม่ได้กำหนดวันหมดอายุ" : `${expireDays} วัน (${form.certificateExpireUnit === "year" ? "คำนวณจากปี x 365 วัน" : "กำหนดเป็นวันโดยตรง"})`}
+              </p>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">หมายเหตุ</label>
+              <input
+                type="text"
+                value={form.remark}
+                onChange={(e) => set("remark", e.target.value)}
+                className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-2">CER.</label>
+            <div className="rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-4 space-y-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="inline-flex items-center gap-2 bg-white border border-gray-300 px-3 py-2 rounded-lg text-sm cursor-pointer hover:bg-gray-100 transition">
+                  <Upload size={15} />
+                  {uploading ? "กำลังอัปโหลด..." : "อัปโหลดไฟล์ CER"}
+                  <input type="file" multiple className="hidden" onChange={handleFileSelect} />
+                </label>
+                <span className="text-xs text-gray-500">อัปโหลดได้มากกว่า 1 ไฟล์ และไม่จำกัดขนาด</span>
+              </div>
+
+              {form.cerFiles.length === 0 ? (
+                <div className="text-sm text-gray-500">ยังไม่มีไฟล์ CER</div>
+              ) : (
+                <div className="space-y-2">
+                  {form.cerFiles.map((file, index) => (
+                    <div key={`${file.url}-${index}`} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2">
+                      <a href={file.url} target="_blank" rel="noreferrer" className="text-sm text-blue-600 hover:underline break-all">
+                        {file.name}
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => removeCerFile(index)}
+                        className="p-1.5 text-red-500 hover:bg-red-50 rounded transition"
+                        title="ลบไฟล์"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <span className="text-sm font-bold text-slate-800">สถานะใบรับรอง</span>
+              {expiryStatus ? (
+                <span className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${expiryStatus.tone}`}>
+                  {expiryStatus.label}
+                </span>
+              ) : (
+                <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-500">
+                  รอข้อมูลวันอบรมและ Certificate Expire
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm text-slate-600">
+              <div><span className="font-medium text-slate-800">วันที่อบรม:</span> {formatDateLabel(form.date)}</div>
+              <div><span className="font-medium text-slate-800">วันหมดอายุ:</span> {formatDateLabel(expiryDate)}</div>
+              <div><span className="font-medium text-slate-800">CER:</span> {formatCerSummary(form) || "-"}</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-gray-50 p-4 border-t border-gray-100 flex justify-end gap-3">
+          <button onClick={onClose} className="px-4 py-2 text-gray-600 font-medium hover:bg-gray-100 rounded-lg text-sm">ยกเลิก</button>
+          <button onClick={handleSave} disabled={uploading} className="px-6 py-2 bg-yellow-500 text-white font-medium rounded-lg hover:bg-yellow-600 disabled:bg-yellow-300 shadow-sm transition text-sm">บันทึก</button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
 
 function CraneTraineeForm({
   trainee,
@@ -1435,35 +2248,106 @@ function CraneTraineeForm({
   onCancel: () => void;
   onSave: (t: CraneTrainee) => void;
 }) {
-  const [form, setForm] = useState<CraneTrainee>(trainee ?? EMPTY_CRANE_TRAINEE);
+  const [form, setForm] = useState<CraneTrainee>(() => normalizeCraneTrainee(trainee));
+  const [employeeCode, setEmployeeCode] = useState(trainee?.employeeCode ?? "");
+  const [lookup, setLookup] = useState<LookupFeedback>({ loading: false, error: "", success: "" });
+  const [historyModalState, setHistoryModalState] = useState<{ open: boolean; index: number | null }>({ open: false, index: null });
   const set = (field: keyof CraneTrainee, val: any) => setForm((prev) => ({ ...prev, [field]: val }));
-  const setRound = (round: "round1" | "round2" | "round3", field: keyof TrainingRecord, val: string) =>
-    setForm((prev) => ({ ...prev, [round]: { ...prev[round], [field]: val } }));
+  const selectedCourses = normalizeCraneCourseSelections(form.course);
+  const trainingHistory = getCraneTrainingHistory(form);
+
+  const updateTrainingHistory = (updater: (history: TrainingRecord[]) => TrainingRecord[]) => {
+    setForm((prev) => syncCraneTrainingHistory(prev, updater(getCraneTrainingHistory(prev))));
+  };
+
+  const handleEmployeeCodeChange = (value: string) => {
+    setEmployeeCode(value);
+    setLookup({ loading: false, error: "", success: "" });
+    setForm((prev) => ({
+      ...prev,
+      employeeCode: value,
+      fullName: "",
+      status: "",
+    }));
+  };
+
+  const handleLookup = async () => {
+    const code = employeeCode.trim();
+    if (!code) {
+      setLookup({ loading: false, error: "กรุณากรอกรหัสพนักงาน", success: "" });
+      return;
+    }
+
+    setLookup({ loading: true, error: "", success: "" });
+    try {
+      const employee = await findMasterEmployee(code);
+      if (!employee) {
+        setForm((prev) => ({ ...prev, employeeCode: code, fullName: "", status: "" }));
+        setLookup({ loading: false, error: "ไม่พบข้อมูลพนักงานจาก MasterDatabase", success: "" });
+        return;
+      }
+      setForm((prev) => ({
+        ...prev,
+        employeeCode: code,
+        fullName: employee.fullName,
+        status: employee.status,
+      }));
+      setLookup({ loading: false, error: "", success: "พบข้อมูลพนักงานแล้ว" });
+    } catch (error) {
+      setLookup({
+        loading: false,
+        error: error instanceof Error ? error.message : "ไม่สามารถเชื่อมต่อ MasterDatabase ได้",
+        success: "",
+      });
+    }
+  };
+
+  const toggleCourse = (course: (typeof CRANE_COURSE_OPTIONS)[number]) => {
+    const nextSelections = selectedCourses.includes(course)
+      ? selectedCourses.filter((item) => item !== course)
+      : [...selectedCourses, course];
+
+    set("course", formatCraneCourseSelections(nextSelections));
+  };
 
   const txt = (label: string, field: keyof CraneTrainee, type = "text") => (
     <div>
       <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
-      <input type={type} value={form[field] as string}
+      <input
+        type={type}
+        value={form[field] as string}
         onChange={(e) => set(field, e.target.value)}
-        className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400" />
+        className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
+      />
+      {field === "lastTrainDate" && <p className="mt-1 text-[11px] text-gray-400">mm/dd/yyyy</p>}
     </div>
   );
 
-  const roundBlock = (label: string, round: "round1" | "round2" | "round3") => (
-    <div className="border border-gray-200 rounded-lg p-3 bg-gray-50">
-      <p className="text-xs font-bold text-gray-600 mb-2">{label}</p>
-      <div className="grid grid-cols-3 gap-2">
-        {(["date", "institute", "cer"] as (keyof TrainingRecord)[]).map((f) => (
-          <div key={f}>
-            <label className="block text-xs text-gray-500 mb-1">{f === "date" ? "วันที่อบรม" : f === "institute" ? "สถาบัน" : "CER."}</label>
-            <input type={f === "date" ? "date" : "text"} value={form[round][f]}
-              onChange={(e) => setRound(round, f, e.target.value)}
-              className="w-full border border-gray-300 rounded p-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-yellow-400" />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+  const openHistoryModal = (index: number | null = null) => setHistoryModalState({ open: true, index });
+  const closeHistoryModal = () => setHistoryModalState({ open: false, index: null });
+
+  const handleSaveHistory = (record: TrainingRecord) => {
+    updateTrainingHistory((history) => {
+      if (historyModalState.index === null) {
+        return [...history, record];
+      }
+
+      return history.map((item, index) => (index === historyModalState.index ? record : item));
+    });
+    closeHistoryModal();
+  };
+
+  const handleSave = () => {
+    if (!employeeCode.trim() || !form.fullName.trim()) {
+      alert("กรุณากรอกรหัสพนักงานและกด Check ก่อนบันทึก");
+      return;
+    }
+
+    onSave(syncCraneTrainingHistory({ ...form, employeeCode: employeeCode.trim() }, trainingHistory));
+  };
+
+  const modalRecord =
+    historyModalState.index === null ? createEmptyTrainingRecord() : trainingHistory[historyModalState.index] ?? createEmptyTrainingRecord();
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
@@ -1476,52 +2360,164 @@ function CraneTraineeForm({
       </div>
 
       <div className="p-6 space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {txt("ชื่อ-สกุล", "fullName")}
-          {txt("ต้นสังกัด (บริษัท)", "company")}
-          {txt("ตำแหน่ง", "position")}
-          {txt("ประเภทปั้นจั่น", "type")}
+        <section className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50/70 p-5">
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">สถานะ</label>
-            <select value={form.status} onChange={(e) => set("status", e.target.value)}
-              className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400">
-              <option value="ปฏิบัติงาน">ปฏิบัติงาน</option>
-              <option value="พ้นสภาพ">พ้นสภาพ</option>
-            </select>
+            <h3 className="text-sm font-bold text-slate-800">ข้อมูลทั่วไป</h3>
+            <p className="text-xs text-slate-500 mt-1">ข้อมูลพนักงานและรายละเอียดพื้นฐานของผู้เข้าอบรม</p>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">โครงการ</label>
-            <select value={form.project} onChange={(e) => set("project", e.target.value)}
-              className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400">
-              <option value="">-- เลือกโครงการ --</option>
-              {projectCodes.map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
-          </div>
-          {txt("หลักสูตร", "course")}
-          {txt("วันที่อบรมล่าสุด", "lastTrainDate", "date")}
-          {txt("สถาบันอบรม", "institute")}
-          {txt("CER.", "cer")}
-          {txt("หมายเหตุ", "remark")}
-          {txt("วันที่เช็ค", "checkDate", "date")}
-        </div>
 
-        <div>
-          <h3 className="text-sm font-bold text-gray-700 mb-3">ประวัติการอบรม (ครั้งที่ 1-3)</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {roundBlock("อบรมครั้งที่ 1", "round1")}
-            {roundBlock("อบรมครั้งที่ 2", "round2")}
-            {roundBlock("อบรมครั้งที่ 3", "round3")}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <EmployeeCodeLookup
+              value={employeeCode}
+              onChange={handleEmployeeCodeChange}
+              onCheck={handleLookup}
+              loading={lookup.loading}
+              error={lookup.error}
+              success={lookup.success}
+            />
+            <ReadOnlyField label="ชื่อ-สกุล" value={form.fullName} />
+            {txt("ต้นสังกัด (บริษัท)", "company")}
+            {txt("ตำแหน่ง", "position")}
+            {txt("ประเภทปั้นจั่น", "type")}
+            <ReadOnlyField label="สถานะ" value={form.status} />
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">โครงการ</label>
+              <select
+                value={form.project}
+                onChange={(e) => set("project", e.target.value)}
+                className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
+              >
+                <option value="">-- เลือกโครงการ --</option>
+                {projectCodes.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div className="md:col-span-3">
+              <label className="block text-xs font-medium text-gray-600 mb-2">หลักสูตร</label>
+              <div className="overflow-x-auto rounded-xl border border-gray-300 bg-white p-3">
+                <div className="flex min-w-max justify-center gap-3">
+                  {CRANE_COURSE_OPTIONS.map((course) => {
+                    const isSelected = selectedCourses.includes(course);
+
+                    return (
+                      <label
+                        key={course}
+                        className={`flex min-w-[220px] flex-shrink-0 items-center justify-center gap-3 rounded-xl border px-4 py-3 text-base font-medium cursor-pointer transition ${getCraneCourseOptionClasses(course, isSelected)}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleCourse(course)}
+                          className="h-5 w-5 rounded border-gray-300 text-yellow-500 focus:ring-yellow-400"
+                        />
+                        <span className="whitespace-nowrap text-center leading-tight">{course}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
+        </section>
+
+        <section className="space-y-4 rounded-2xl border border-yellow-200 bg-yellow-50/70 p-5">
+          <div className="rounded-2xl border border-white/80 bg-white p-4 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <div>
+                <h4 className="text-sm font-bold text-gray-800">การอบรม</h4>
+                <p className="text-xs text-gray-500 mt-1">จัดการผ่านปุ่มเพิ่มการอบรม และระบบจะอัปเดตข้อมูลอบรมล่าสุดให้อัตโนมัติ</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => openHistoryModal(null)}
+                className="flex items-center gap-1.5 bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-2 rounded-lg text-sm font-medium shadow-sm transition"
+              >
+                <Plus size={15} /> Add การอบรม
+              </button>
+            </div>
+
+            {trainingHistory.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 px-4 py-6 text-center text-sm text-gray-500">
+                ยังไม่มีประวัติการอบรม
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {trainingHistory.map((record, index) => (
+                  <div key={`${record.date}-${index}`} className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                    {(() => {
+                      const expiryStatus = getTrainingExpiryStatus(record);
+                      const expiryDate = getTrainingExpiryDate(record);
+
+                      return (
+                        <>
+                    <div className="flex items-start justify-between gap-2 mb-3">
+                      <div>
+                        <p className="text-sm font-bold text-gray-800">ครั้งที่ {index + 1}</p>
+                        <p className="text-xs text-gray-500">{record.date || "-"}</p>
+                        {expiryStatus && (
+                          <span className={`mt-2 inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${expiryStatus.tone}`}>
+                            {expiryStatus.label}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex gap-1">
+                        <button type="button" onClick={() => openHistoryModal(index)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition" title="แก้ไข"><Pencil size={14} /></button>
+                        <button
+                          type="button"
+                          onClick={() => updateTrainingHistory((history) => history.filter((_, itemIndex) => itemIndex !== index))}
+                          className="p-1.5 text-red-500 hover:bg-red-50 rounded transition"
+                          title="ลบ"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="space-y-2 text-sm text-gray-600">
+                      <div><span className="font-medium text-gray-800">สถาบัน:</span> {record.institute || "-"}</div>
+                      <div><span className="font-medium text-gray-800">CER.:</span> {formatCerSummary(record) || "-"}</div>
+                      <div><span className="font-medium text-gray-800">Certificate Expire:</span> {record.certificateExpireValue ? `${record.certificateExpireValue} ${record.certificateExpireUnit === "year" ? "ปี" : "วัน"}` : "-"}</div>
+                      <div><span className="font-medium text-gray-800">วันหมดอายุ:</span> {formatDateLabel(expiryDate)}</div>
+                      {record.cerFiles.length > 0 && (
+                        <div className="space-y-1">
+                          <div><span className="font-medium text-gray-800">ไฟล์ CER:</span> {record.cerFiles.length} ไฟล์</div>
+                          <div className="flex flex-col gap-1">
+                            {record.cerFiles.map((file, fileIndex) => (
+                              <a key={`${file.url}-${fileIndex}`} href={file.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all">
+                                {file.name}
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      <div><span className="font-medium text-gray-800">หมายเหตุ:</span> {record.remark || "-"}</div>
+                    </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
       </div>
 
       <div className="bg-gray-50 p-4 border-t border-gray-100 flex justify-end gap-3">
         <button onClick={onCancel} className="px-4 py-2 text-gray-600 font-medium hover:bg-gray-100 rounded-lg text-sm">ยกเลิก</button>
-        <button onClick={() => onSave(form)}
+        <button onClick={handleSave}
           className="px-6 py-2 bg-yellow-500 text-white font-medium rounded-lg hover:bg-yellow-600 shadow-sm transition text-sm">
           บันทึก
         </button>
       </div>
+
+      {historyModalState.open && (
+        <CraneTrainingHistoryModal
+          title={historyModalState.index === null ? "เพิ่มประวัติการอบรม" : `แก้ไขประวัติการอบรม ครั้งที่ ${historyModalState.index + 1}`}
+          record={modalRecord}
+          traineeKey={form.employeeCode || String(form.id || "new")}
+          onClose={closeHistoryModal}
+          onSave={handleSaveHistory}
+        />
+      )}
     </div>
   );
 }
@@ -1572,7 +2568,15 @@ function rowToConfined(row: Record<string, string>, id: number): ConfinedSpaceTr
     status: row["สถานะ"] || "ปฏิบัติงาน", project: row["โครงการ"] || "",
     course: row["หลักสูตร"] || "", lastTrainDate: row["วันที่อบรมล่าสุด"] || "",
     institute: row["สถาบันอบรม"] || "", cer: row["CER."] || "",
-    renewal3yr: { date: row["ครบรอบ3ปี_วันที่"] || "", institute: row["ครบรอบ3ปี_สถาบัน"] || "", cer: row["ครบรอบ3ปี_CER"] || "" },
+    renewal3yr: {
+      date: row["ครบรอบ3ปี_วันที่"] || "",
+      institute: row["ครบรอบ3ปี_สถาบัน"] || "",
+      cer: row["ครบรอบ3ปี_CER"] || "",
+      cerFiles: [],
+      certificateExpireValue: "",
+      certificateExpireUnit: "day",
+      remark: "",
+    },
     remark: row["หมายเหตุ"] || "", checkDate: row["วันที่เช็ค"] || "",
   };
 }
@@ -1696,11 +2700,13 @@ function ConfinedSpaceRegisterList({
         </div>
       </div>
 
-      <div className="relative mb-4">
-        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+      <div className="bg-white border border-slate-200 rounded-[24px] p-4 sm:p-5 shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)]">
+        <div className="relative">
+          <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
         <input type="text" placeholder="ค้นหาชื่อ, โครงการ, บริษัท..."
           value={search} onChange={(e) => setSearch(e.target.value)}
           className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+        </div>
       </div>
 
       <div className="text-xs text-gray-400 mb-2">ทั้งหมด {trainees.length} รายการ {search && `(กรองแล้ว ${filtered.length} รายการ)`}</div>
@@ -1760,9 +2766,10 @@ function ConfinedSpaceRegisterList({
 }
 
 const EMPTY_CONFINED_TRAINEE: ConfinedSpaceTrainee = {
+  employeeCode: "",
   id: 0, fullName: "", company: "", position: "", type: "", status: "ปฏิบัติงาน",
   project: "", course: "", lastTrainDate: "", institute: "", cer: "",
-  renewal3yr: { date: "", institute: "", cer: "" },
+  renewal3yr: createEmptyTrainingRecord(),
   remark: "", checkDate: "",
 };
 
@@ -1777,10 +2784,58 @@ function ConfinedSpaceTraineeForm({
   onCancel: () => void;
   onSave: (t: ConfinedSpaceTrainee) => void;
 }) {
-  const [form, setForm] = useState<ConfinedSpaceTrainee>(trainee ?? EMPTY_CONFINED_TRAINEE);
+  const [form, setForm] = useState<ConfinedSpaceTrainee>({
+    ...EMPTY_CONFINED_TRAINEE,
+    ...(trainee ?? {}),
+    employeeCode: trainee?.employeeCode ?? "",
+  });
+  const [employeeCode, setEmployeeCode] = useState(trainee?.employeeCode ?? "");
+  const [lookup, setLookup] = useState<LookupFeedback>({ loading: false, error: "", success: "" });
   const set = (field: keyof ConfinedSpaceTrainee, val: any) => setForm((prev) => ({ ...prev, [field]: val }));
   const setRenewal = (field: keyof TrainingRecord, val: string) =>
     setForm((prev) => ({ ...prev, renewal3yr: { ...prev.renewal3yr, [field]: val } }));
+
+  const handleEmployeeCodeChange = (value: string) => {
+    setEmployeeCode(value);
+    setLookup({ loading: false, error: "", success: "" });
+    setForm((prev) => ({
+      ...prev,
+      employeeCode: value,
+      fullName: "",
+      status: "",
+    }));
+  };
+
+  const handleLookup = async () => {
+    const code = employeeCode.trim();
+    if (!code) {
+      setLookup({ loading: false, error: "กรุณากรอกรหัสพนักงาน", success: "" });
+      return;
+    }
+
+    setLookup({ loading: true, error: "", success: "" });
+    try {
+      const employee = await findMasterEmployee(code);
+      if (!employee) {
+        setForm((prev) => ({ ...prev, employeeCode: code, fullName: "", status: "" }));
+        setLookup({ loading: false, error: "ไม่พบข้อมูลพนักงานจาก MasterDatabase", success: "" });
+        return;
+      }
+      setForm((prev) => ({
+        ...prev,
+        employeeCode: code,
+        fullName: employee.fullName,
+        status: employee.status,
+      }));
+      setLookup({ loading: false, error: "", success: "พบข้อมูลพนักงานแล้ว" });
+    } catch (error) {
+      setLookup({
+        loading: false,
+        error: error instanceof Error ? error.message : "ไม่สามารถเชื่อมต่อ MasterDatabase ได้",
+        success: "",
+      });
+    }
+  };
 
   const txt = (label: string, field: keyof ConfinedSpaceTrainee, type = "text") => (
     <div>
@@ -1790,6 +2845,15 @@ function ConfinedSpaceTraineeForm({
         className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
     </div>
   );
+
+  const handleSave = () => {
+    if (!employeeCode.trim() || !form.fullName.trim()) {
+      alert("กรุณากรอกรหัสพนักงานและกด Check ก่อนบันทึก");
+      return;
+    }
+
+    onSave({ ...form, employeeCode: employeeCode.trim() });
+  };
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
@@ -1803,18 +2867,19 @@ function ConfinedSpaceTraineeForm({
 
       <div className="p-6 space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {txt("ชื่อ-สกุล", "fullName")}
+          <EmployeeCodeLookup
+            value={employeeCode}
+            onChange={handleEmployeeCodeChange}
+            onCheck={handleLookup}
+            loading={lookup.loading}
+            error={lookup.error}
+            success={lookup.success}
+          />
+          <ReadOnlyField label="ชื่อ-สกุล" value={form.fullName} />
           {txt("ต้นสังกัด (บริษัท)", "company")}
           {txt("ตำแหน่ง", "position")}
           {txt("ประเภท", "type")}
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">สถานะ</label>
-            <select value={form.status} onChange={(e) => set("status", e.target.value)}
-              className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
-              <option value="ปฏิบัติงาน">ปฏิบัติงาน</option>
-              <option value="พ้นสภาพ">พ้นสภาพ</option>
-            </select>
-          </div>
+          <ReadOnlyField label="สถานะ" value={form.status} />
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">โครงการ</label>
             <select value={form.project} onChange={(e) => set("project", e.target.value)}
@@ -1858,7 +2923,7 @@ function ConfinedSpaceTraineeForm({
 
       <div className="bg-gray-50 p-4 border-t border-gray-100 flex justify-end gap-3">
         <button onClick={onCancel} className="px-4 py-2 text-gray-600 font-medium hover:bg-gray-100 rounded-lg text-sm">ยกเลิก</button>
-        <button onClick={() => onSave(form)}
+        <button onClick={handleSave}
           className="px-6 py-2 bg-teal-600 text-white font-medium rounded-lg hover:bg-teal-700 shadow-sm transition text-sm">
           บันทึก
         </button>
@@ -1891,14 +2956,14 @@ function ProjectsList({
 
   return (
     <div>
-      <div className="flex justify-between items-center mb-5">
+      <div className="flex flex-wrap justify-between items-end gap-3">
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
           <Building2 className="text-blue-600" size={22} />
           ข้อมูลโครงการ / Projects
         </h2>
         <button
           onClick={onAdd}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 shadow-sm transition text-sm font-medium"
+          className="bg-[#183b6b] hover:bg-[#122f55] text-white px-4 py-2.5 rounded-xl flex items-center gap-2 shadow-sm transition text-sm font-medium"
         >
           <Plus size={16} /> เพิ่มโครงการ
         </button>
@@ -1911,18 +2976,18 @@ function ProjectsList({
           placeholder="ค้นหาโครงการ..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+          className="w-full pl-11 pr-4 py-3 border border-slate-200 rounded-2xl text-sm bg-slate-50/70 focus:outline-none focus:ring-2 focus:ring-blue-400"
         />
       </div>
 
       {filtered.length === 0 ? (
-        <div className="text-center py-16 bg-white rounded-xl border border-dashed border-gray-300 text-gray-400">
+        <div className="text-center py-12 bg-white rounded-[24px] border border-dashed border-slate-300 text-slate-400">
           ไม่พบโครงการ
         </div>
       ) : (
-        <div className="grid gap-4">
+        <div className="grid gap-3">
           {filtered.map((p) => (
-            <div key={p.id} className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 hover:shadow-md transition">
+            <div key={p.id} className="bg-white rounded-[24px] shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)] border border-slate-200 p-4 hover:shadow-lg transition">
               <div className="flex justify-between items-start">
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
@@ -2164,16 +3229,19 @@ function DailyReportList({
   onCreateReport: () => void;
 }) {
   return (
-    <div>
-      <div className="flex justify-between items-center mb-5">
-        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+    <div className="space-y-5">
+      <div className="flex flex-wrap justify-between items-end gap-3">
+        <div className="space-y-1">
+        <h2 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
           <ClipboardList className="text-blue-600" size={22} />
           Daily Report — รายงานประจำวัน
         </h2>
+        <div className="text-sm text-slate-500">{reports.length} รายการที่พร้อมดำเนินการ</div>
+        </div>
         {hasWorkflowRole("staff") && (
           <button
             onClick={onCreateReport}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 shadow-sm transition text-sm font-medium"
+            className="bg-[#183b6b] hover:bg-[#122f55] text-white px-4 py-2.5 rounded-xl flex items-center gap-2 shadow-sm transition text-sm font-medium"
           >
             <Plus size={16} /> สร้างรายงานใหม่
           </button>
@@ -2181,16 +3249,16 @@ function DailyReportList({
       </div>
 
       {reports.length === 0 ? (
-        <div className="text-center py-16 bg-white rounded-xl border border-dashed border-gray-300 text-gray-400">
+        <div className="text-center py-12 bg-white rounded-[24px] border border-dashed border-slate-300 text-slate-400">
           ไม่พบรายงานที่ต้องดำเนินการในขณะนี้
         </div>
       ) : (
-        <div className="grid gap-4">
+        <div className="grid gap-3">
           {reports.map((report) => (
             <div
               key={report.id}
               onClick={() => onSelectReport(report)}
-              className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition cursor-pointer flex justify-between items-center"
+              className="bg-white p-4 rounded-[24px] shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)] border border-slate-200 hover:shadow-lg transition cursor-pointer flex justify-between items-center"
             >
               <div>
                 <div className="flex items-center gap-2 mb-1 flex-wrap">
@@ -2244,30 +3312,33 @@ function SiteAuditList({
   };
 
   return (
-    <div>
-      <div className="flex justify-between items-center mb-5">
-        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+    <div className="space-y-5">
+      <div className="flex flex-wrap justify-between items-end gap-3">
+        <div className="space-y-1">
+        <h2 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
           <ShieldCheck className="text-blue-600" size={22} />
           Site Audit Report
         </h2>
+        <div className="text-sm text-slate-500">{audits.length} audit records</div>
+        </div>
         <button
           onClick={onAdd}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 shadow-sm transition text-sm font-medium"
+          className="bg-[#183b6b] hover:bg-[#122f55] text-white px-4 py-2.5 rounded-xl flex items-center gap-2 shadow-sm transition text-sm font-medium"
         >
           <Plus size={16} /> New Audit
         </button>
       </div>
 
       {audits.length === 0 ? (
-        <div className="text-center py-16 bg-white rounded-xl border border-dashed border-gray-300 text-gray-400">
+        <div className="text-center py-12 bg-white rounded-[24px] border border-dashed border-slate-300 text-slate-400">
           ยังไม่มีรายการ Audit
         </div>
       ) : (
-        <div className="grid gap-4">
+        <div className="grid gap-3">
           {audits.sort((a, b) => b.createdAt - a.createdAt).map((audit) => (
             <div
               key={audit.id}
-              className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 hover:shadow-md transition"
+              className="bg-white rounded-[24px] shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)] border border-slate-200 p-4 hover:shadow-lg transition"
             >
               <div className="flex justify-between items-start">
                 <div className="flex-1 cursor-pointer" onClick={() => onView(audit)}>

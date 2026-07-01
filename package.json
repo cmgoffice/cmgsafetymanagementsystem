@@ -1,13 +1,8 @@
 {
   "name": "react-typescript",
   "version": "1.0.0",
-  "description": "React and TypeScript example starter project",
-  "keywords": [
-    "typescript",
-    "react",
-    "starter"
-  ],
-  "main": "src/index.tsx",
+  "private": true,
+  "description": "CMG Safety Management System",
   "dependencies": {
     "firebase": "^12.9.0",
     "loader-utils": "3.2.1",
@@ -15,24 +10,19 @@
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "react-router-dom": "^7.13.1",
-    "react-scripts": "5.0.1",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/react": "18.2.38",
     "@types/react-dom": "18.2.15",
-    "typescript": "4.4.4"
+    "@vitejs/plugin-react": "^5.1.0",
+    "typescript": "^5.9.2",
+    "vite": "^8.0.0"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test --env=jsdom",
-    "eject": "react-scripts eject"
-  },
-  "browserslist": [
-    ">0.2%",
-    "not dead",
-    "not ie <= 11",
-    "not op_mini all"
-  ]
+    "dev": "vite",
+    "start": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  }
 }
