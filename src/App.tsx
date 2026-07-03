@@ -35,6 +35,11 @@ import {
   Settings,
   Columns,
   ChevronDown,
+  Award,
+  Calendar,
+  FileText,
+  ExternalLink,
+  Info,
 } from "lucide-react";
 
 // --- TYPES ---
@@ -2305,53 +2310,92 @@ function CraneTraineeDetailModal({
                   const expiryDate = getTrainingExpiryDate(record);
 
                   return (
-                    <div key={`${record.date}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <div className="text-xs font-bold text-slate-900">ครั้งที่ {index + 1}</div>
-                          <div className="mt-0.5 text-[11px] text-slate-500">{formatDateLabel(record.date)}</div>
+                    <div key={`${record.date}-${index}`} className="relative overflow-hidden rounded-2xl border border-yellow-100 bg-gradient-to-br from-yellow-50/20 to-white p-5 shadow-sm transition hover:shadow-md">
+                      <div className="absolute left-0 top-0 bottom-0 w-1 bg-yellow-500" />
+                      
+                      <div className="flex flex-wrap items-center justify-between gap-3 pl-2">
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-yellow-50 text-yellow-600 border border-yellow-100 shadow-sm">
+                            <Award size={20} />
+                          </div>
+                          <div>
+                            <div className="text-sm font-bold text-slate-800">การอบรมครั้งที่ {index + 1}</div>
+                            <div className="mt-0.5 flex items-center gap-1 text-xs text-slate-505">
+                              <Calendar size={13} className="text-slate-400" />
+                              <span className="text-slate-505 text-slate-500">{formatDateLabel(record.date)}</span>
+                            </div>
+                          </div>
                         </div>
                         {expiryStatus && (
-                          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${expiryStatus.tone}`}>
+                          <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold shadow-sm ${expiryStatus.tone}`}>
+                            {expiryStatus.tone.includes("red") && <AlertTriangle size={13} className="animate-pulse" />}
+                            {expiryStatus.tone.includes("amber") && <AlertTriangle size={13} />}
+                            {expiryStatus.tone.includes("emerald") && <ShieldCheck size={13} />}
                             {expiryStatus.label}
                           </span>
                         )}
                       </div>
 
-                      <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
-                        <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
-                          <div className="text-[10px] font-medium text-slate-500">สถาบัน</div>
-                          <div className="mt-0.5 text-xs text-slate-900">{record.institute || "-"}</div>
-                        </div>
-                        <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
-                          <div className="text-[10px] font-medium text-slate-500">CER.</div>
-                          <div className="mt-0.5 text-xs text-slate-900">{formatCerSummary(record) || "-"}</div>
-                        </div>
-                        <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
-                          <div className="text-[10px] font-medium text-slate-500">วันหมดอายุ</div>
-                          <div className="mt-0.5 text-xs text-slate-900">{formatDateLabel(expiryDate) || "-"}</div>
-                        </div>
-                        <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
-                          <div className="text-[10px] font-medium text-slate-500">ไฟล์ CER</div>
-                          <div className="mt-1.5 flex flex-wrap gap-1.5">
-                            {record.cerFiles.length > 0 ? record.cerFiles.map((file, fileIndex) => (
-                              <a
-                                key={`${file.url}-${fileIndex}`}
-                                href={file.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex rounded-md border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700 hover:bg-sky-100"
-                              >
-                                {file.name || `ไฟล์ ${fileIndex + 1}`}
-                              </a>
-                            )) : <span className="text-xs text-slate-400">-</span>}
+                      <div className="mt-4 grid grid-cols-1 gap-3 pl-2 sm:grid-cols-2 md:grid-cols-4">
+                        <div className="flex items-start gap-2.5 rounded-xl border border-slate-100 bg-slate-50/40 p-3">
+                          <Building2 size={16} className="mt-0.5 text-yellow-600 shrink-0" />
+                          <div>
+                            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">สถาบันฝึกอบรม</div>
+                            <div className="mt-0.5 text-xs font-semibold text-slate-700">{record.institute || "-"}</div>
                           </div>
                         </div>
-                        <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
-                          <div className="text-[10px] font-medium text-slate-500">หมายเหตุ</div>
-                          <div className="mt-0.5 text-xs text-slate-900">{record.remark || "-"}</div>
+
+                        <div className="flex items-start gap-2.5 rounded-xl border border-slate-100 bg-slate-50/40 p-3">
+                          <FileText size={16} className="mt-0.5 text-yellow-600 shrink-0" />
+                          <div>
+                            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">เลขที่ใบรับรอง</div>
+                            <div className="mt-0.5 text-xs font-semibold text-slate-700">{formatCerSummary(record) || "-"}</div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-start gap-2.5 rounded-xl border border-slate-100 bg-slate-50/40 p-3">
+                          <Clock size={16} className="mt-0.5 text-yellow-600 shrink-0" />
+                          <div>
+                            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">วันหมดอายุ</div>
+                            <div className="mt-0.5 text-xs font-semibold text-slate-700">{formatDateLabel(expiryDate) || "-"}</div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-start gap-2.5 rounded-xl border border-slate-100 bg-slate-50/40 p-3">
+                          <Upload size={16} className="mt-0.5 text-yellow-600 shrink-0" />
+                          <div>
+                            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">ไฟล์ใบรับรอง</div>
+                            <div className="mt-1.5 flex flex-wrap gap-1.5">
+                              {record.cerFiles && record.cerFiles.length > 0 ? (
+                                record.cerFiles.map((file, fileIndex) => (
+                                  <a
+                                    key={`${file.url}-${fileIndex}`}
+                                    href={file.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="inline-flex items-center gap-1 rounded-md border border-yellow-200 bg-yellow-50 px-2 py-0.5 text-[10px] font-medium text-yellow-800 hover:bg-yellow-100 transition-all shadow-sm"
+                                  >
+                                    <ExternalLink size={10} />
+                                    {file.name || `ไฟล์ ${fileIndex + 1}`}
+                                  </a>
+                                ))
+                              ) : (
+                                <span className="text-xs text-slate-400">-</span>
+                              )}
+                            </div>
+                          </div>
                         </div>
                       </div>
+
+                      {record.remark && (
+                        <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-slate-100 bg-slate-50/20 p-3 ml-2">
+                          <Info size={16} className="mt-0.5 text-slate-400 shrink-0" />
+                          <div>
+                            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">หมายเหตุ</div>
+                            <div className="mt-0.5 text-xs text-slate-600 leading-relaxed">{record.remark}</div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -3584,53 +3628,92 @@ function ConfinedSpaceTraineeDetailModal({
                     const expiryDate = getTrainingExpiryDate(record);
 
                     return (
-                      <div key={`${record.date}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
-                            <div className="text-xs font-bold text-slate-900">ครั้งที่ {index + 1}</div>
-                            <div className="mt-0.5 text-[11px] text-slate-500">{formatDateLabel(record.date)}</div>
+                      <div key={`${record.date}-${index}`} className="relative overflow-hidden rounded-2xl border border-teal-100 bg-gradient-to-br from-teal-50/20 to-white p-5 shadow-sm transition hover:shadow-md">
+                        <div className="absolute left-0 top-0 bottom-0 w-1 bg-teal-500" />
+                        
+                        <div className="flex flex-wrap items-center justify-between gap-3 pl-2">
+                          <div className="flex items-center gap-3">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-teal-50 text-teal-600 border border-teal-100 shadow-sm">
+                              <Award size={20} />
+                            </div>
+                            <div>
+                              <div className="text-sm font-bold text-slate-800">การอบรมครั้งที่ {index + 1}</div>
+                              <div className="mt-0.5 flex items-center gap-1 text-xs text-slate-505">
+                                <Calendar size={13} className="text-slate-400" />
+                                <span className="text-slate-500">{formatDateLabel(record.date)}</span>
+                              </div>
+                            </div>
                           </div>
                           {expiryStatus && (
-                            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${expiryStatus.tone}`}>
+                            <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold shadow-sm ${expiryStatus.tone}`}>
+                              {expiryStatus.tone.includes("red") && <AlertTriangle size={13} className="animate-pulse" />}
+                              {expiryStatus.tone.includes("amber") && <AlertTriangle size={13} />}
+                              {expiryStatus.tone.includes("emerald") && <ShieldCheck size={13} />}
                               {expiryStatus.label}
                             </span>
                           )}
                         </div>
 
-                        <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
-                          <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
-                            <div className="text-[10px] font-medium text-slate-500">สถาบัน</div>
-                            <div className="mt-0.5 text-xs text-slate-900">{record.institute || "-"}</div>
-                          </div>
-                          <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
-                            <div className="text-[10px] font-medium text-slate-500">CER.</div>
-                            <div className="mt-0.5 text-xs text-slate-900">{formatCerSummary(record) || "-"}</div>
-                          </div>
-                          <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
-                            <div className="text-[10px] font-medium text-slate-500">วันหมดอายุ</div>
-                            <div className="mt-0.5 text-xs text-slate-900">{formatDateLabel(expiryDate) || "-"}</div>
-                          </div>
-                          <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
-                            <div className="text-[10px] font-medium text-slate-500">ไฟล์ CER</div>
-                            <div className="mt-1.5 flex flex-wrap gap-1.5">
-                              {record.cerFiles.length > 0 ? record.cerFiles.map((file, fileIndex) => (
-                                <a
-                                  key={`${file.url}-${fileIndex}`}
-                                  href={file.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="inline-flex rounded-md border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700 hover:bg-sky-100"
-                                >
-                                  {file.name || `ไฟล์ ${fileIndex + 1}`}
-                                </a>
-                              )) : <span className="text-xs text-slate-400">-</span>}
+                        <div className="mt-4 grid grid-cols-1 gap-3 pl-2 sm:grid-cols-2 md:grid-cols-4">
+                          <div className="flex items-start gap-2.5 rounded-xl border border-slate-100 bg-slate-50/40 p-3">
+                            <Building2 size={16} className="mt-0.5 text-teal-600 shrink-0" />
+                            <div>
+                              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">สถาบันฝึกอบรม</div>
+                              <div className="mt-0.5 text-xs font-semibold text-slate-700">{record.institute || "-"}</div>
                             </div>
                           </div>
-                          <div className="rounded-lg border border-white bg-white p-2.5 shadow-sm">
-                            <div className="text-[10px] font-medium text-slate-500">หมายเหตุ</div>
-                            <div className="mt-0.5 text-xs text-slate-900">{record.remark || "-"}</div>
+
+                          <div className="flex items-start gap-2.5 rounded-xl border border-slate-100 bg-slate-50/40 p-3">
+                            <FileText size={16} className="mt-0.5 text-teal-600 shrink-0" />
+                            <div>
+                              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">เลขที่ใบรับรอง</div>
+                              <div className="mt-0.5 text-xs font-semibold text-slate-700">{formatCerSummary(record) || "-"}</div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-start gap-2.5 rounded-xl border border-slate-100 bg-slate-50/40 p-3">
+                            <Clock size={16} className="mt-0.5 text-teal-600 shrink-0" />
+                            <div>
+                              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">วันหมดอายุ</div>
+                              <div className="mt-0.5 text-xs font-semibold text-slate-700">{formatDateLabel(expiryDate) || "-"}</div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-start gap-2.5 rounded-xl border border-slate-100 bg-slate-50/40 p-3">
+                            <Upload size={16} className="mt-0.5 text-teal-600 shrink-0" />
+                            <div>
+                              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">ไฟล์ใบรับรอง</div>
+                              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                {record.cerFiles && record.cerFiles.length > 0 ? (
+                                  record.cerFiles.map((file, fileIndex) => (
+                                    <a
+                                      key={`${file.url}-${fileIndex}`}
+                                      href={file.url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="inline-flex items-center gap-1 rounded-md border border-teal-200 bg-teal-50 px-2 py-0.5 text-[10px] font-medium text-teal-700 hover:bg-teal-100 transition-all shadow-sm"
+                                    >
+                                      <ExternalLink size={10} />
+                                      {file.name || `ไฟล์ ${fileIndex + 1}`}
+                                    </a>
+                                  ))
+                                ) : (
+                                  <span className="text-xs text-slate-400">-</span>
+                                )}
+                              </div>
+                            </div>
                           </div>
                         </div>
+
+                        {record.remark && (
+                          <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-slate-100 bg-slate-50/20 p-3 ml-2">
+                            <Info size={16} className="mt-0.5 text-slate-400 shrink-0" />
+                            <div>
+                              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">หมายเหตุ</div>
+                              <div className="mt-0.5 text-xs text-slate-600 leading-relaxed">{record.remark}</div>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
