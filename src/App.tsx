@@ -1276,6 +1276,7 @@ export default function App() {
             <>
               <CraneRegisterList
                 trainees={craneTrainees}
+                projectCodes={projectCodes}
                 onAdd={() => { setEditingCrane(null); setCraneView("form"); }}
                 onEdit={(t: CraneTrainee) => { setEditingCrane(t); setCraneView("form"); }}
                 onDelete={handleDeleteCrane}
@@ -1979,18 +1980,21 @@ const CRANE_TABLE_COLUMNS: { key: string; label: string; courseOption?: (typeof 
 
 function CraneRegisterList({
   trainees,
+  projectCodes,
   onAdd,
   onEdit,
   onDelete,
   onImport,
 }: {
   trainees: CraneTrainee[];
+  projectCodes: string[];
   onAdd: () => void;
   onEdit: (t: CraneTrainee) => void;
   onDelete: (id: number) => void;
   onImport: (rows: CraneTrainee[]) => void;
 }) {
   const [search, setSearch] = useState("");
+  const [projectFilter, setProjectFilter] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const [selectedTrainee, setSelectedTrainee] = useState<CraneTrainee | null>(null);
   const [visibleColumns, setVisibleColumns] = useState<Record<string, boolean>>(() =>
@@ -1998,6 +2002,17 @@ function CraneRegisterList({
   );
   const [columnPopupOpen, setColumnPopupOpen] = useState(false);
   const columnPopupRef = useRef<HTMLDivElement>(null);
+  const projectOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [...projectCodes, ...trainees.map((t) => t.project)]
+            .map((project) => project.trim())
+            .filter(Boolean)
+        )
+      ).sort((a, b) => a.localeCompare(b)),
+    [projectCodes, trainees]
+  );
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -2010,10 +2025,15 @@ function CraneRegisterList({
   }, [columnPopupOpen]);
 
   const filtered = trainees.filter(
-    (t) =>
-      t.fullName.toLowerCase().includes(search.toLowerCase()) ||
-      t.project.toLowerCase().includes(search.toLowerCase()) ||
-      t.company.toLowerCase().includes(search.toLowerCase())
+    (t) => {
+      const matchesProject = !projectFilter || t.project === projectFilter;
+      const matchesSearch =
+        t.fullName.toLowerCase().includes(search.toLowerCase()) ||
+        t.project.toLowerCase().includes(search.toLowerCase()) ||
+        t.company.toLowerCase().includes(search.toLowerCase());
+
+      return matchesProject && matchesSearch;
+    }
   );
   const maxHistoryCount = Math.max(1, ...trainees.map((t) => getCraneTrainingHistory(t).length));
 
@@ -2056,7 +2076,7 @@ function CraneRegisterList({
           <HardHat className="text-yellow-500" size={22} />
           ทะเบียนรายชื่อผู้อบรมปั้นจั่น (Crane)
         </h2>
-        <div className="text-sm text-slate-500">ทั้งหมด {filtered.length} โครงการ</div>
+        <div className="text-sm text-slate-500">ทั้งหมด {filtered.length} รายการ</div>
         </div>
         <div className="flex flex-wrap gap-2">
           <div className="relative" ref={columnPopupRef}>
@@ -2104,15 +2124,29 @@ function CraneRegisterList({
       </div>
 
       <div className="bg-white border border-slate-200 rounded-[24px] p-4 sm:p-5 shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)]">
-        <div className="relative">
-          <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
-        <input type="text" placeholder="ค้นหาชื่อ, โครงการ, บริษัท..."
-          value={search} onChange={(e) => setSearch(e.target.value)}
-          className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400" />
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_240px]">
+          <div className="relative">
+            <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input type="text" placeholder="ค้นหาชื่อ, โครงการ, บริษัท..."
+              value={search} onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400" />
+          </div>
+          <select
+            value={projectFilter}
+            onChange={(e) => setProjectFilter(e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-400"
+          >
+            <option value="">ทุกโครงการ</option>
+            {projectOptions.map((project) => (
+              <option key={project} value={project}>{project}</option>
+            ))}
+          </select>
         </div>
       </div>
 
-      <div className="text-xs text-gray-400 mb-2">ทั้งหมด {trainees.length} รายการ {search && `(กรองแล้ว ${filtered.length} รายการ)`}</div>
+      <div className="text-xs text-gray-400 mb-2">
+        ทั้งหมด {trainees.length} รายการ {(search || projectFilter) && `(กรองแล้ว ${filtered.length} รายการ)`}
+      </div>
 
       {filtered.length === 0 ? (
         <div className="text-center py-16 text-gray-400">ไม่พบรายการ</div>
