@@ -3,9 +3,9 @@ import { Link, useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { useFirestoreCollection } from "./useFirestore";
 import { seedToFirebase } from "./seedFirebase";
-import { collection, doc, getDocs } from "firebase/firestore";
+import { collection, doc, getDocs, onSnapshot } from "firebase/firestore";
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
-import { db, storage } from "./firebase";
+import { db, masterDb, storage } from "./firebase";
 import { findMasterEmployee } from "./masterDatabase";
 import type { MasterEmployeeRecord } from "./masterDatabase";
 import { useAuth } from "./auth/AuthContext";
@@ -28,6 +28,7 @@ import {
   Building2,
   HardHat,
   Wind,
+  Calendar,
   Download,
   Upload,
   FileDown,
@@ -194,6 +195,7 @@ type TrainingSignIn = {
 };
 
 type SidebarSection = "projects" | "daily-report" | "site-audit" | "crane-register" | "confined-space-register" | "training-signin";
+type CraneRegisterTab = "trainee-register" | "daily-operation-report";
 type LookupFeedback = { loading: boolean; error: string; success: string };
 type SidebarNavItem = { key: SidebarSection; label: string; icon: React.ReactNode; badgeCount?: number };
 
@@ -501,7 +503,127 @@ function toDateOnly(value?: string | null): Date | null {
 function formatDateLabel(value?: string | null): string {
   const date = toDateOnly(value);
   if (!date) return "-";
-  return date.toLocaleDateString("en-US");
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const year = date.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+function formatDateInputDisplay(value?: string | null): string {
+  const date = toDateOnly(value);
+  if (!date) return "";
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const year = date.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+function parseDisplayDate(value?: string | null): string {
+  const digits = (value ?? "").replace(/\D/g, "").slice(0, 8);
+  if (digits.length !== 8) return "";
+  const day = Number(digits.slice(0, 2));
+  const month = Number(digits.slice(2, 4));
+  const year = Number(digits.slice(4, 8));
+  if (!day || !month || !year) return "";
+  const date = new Date(year, month - 1, day);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return "";
+  }
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function normalizeDateDraft(value: string): string {
+  const digits = value.replace(/\D/g, "").slice(0, 8);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+}
+
+function DateDisplayInput({
+  value,
+  onChange,
+  inputClassName,
+  buttonClassName,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  inputClassName: string;
+  buttonClassName: string;
+}) {
+  const [draft, setDraft] = useState(() => formatDateInputDisplay(value));
+  const pickerRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setDraft(formatDateInputDisplay(value));
+  }, [value]);
+
+  const handleDraftChange = (nextValue: string) => {
+    const normalized = normalizeDateDraft(nextValue);
+    setDraft(normalized);
+    const parsed = parseDisplayDate(normalized);
+    if (parsed) onChange(parsed);
+    if (!normalized) onChange("");
+  };
+
+  const handleBlur = () => {
+    const parsed = parseDisplayDate(draft);
+    if (!draft.trim()) {
+      onChange("");
+      setDraft("");
+      return;
+    }
+    if (!parsed) {
+      setDraft(formatDateInputDisplay(value));
+      return;
+    }
+    onChange(parsed);
+    setDraft(formatDateInputDisplay(parsed));
+  };
+
+  const openPicker = () => {
+    const picker = pickerRef.current;
+    if (!picker) return;
+    if ("showPicker" in picker) {
+      picker.showPicker();
+      return;
+    }
+    picker.click();
+  };
+
+  return (
+    <div className="relative">
+      <input
+        type="text"
+        inputMode="numeric"
+        placeholder="DD/MM/YYYY"
+        value={draft}
+        onChange={(e) => handleDraftChange(e.target.value)}
+        onBlur={handleBlur}
+        className={inputClassName}
+      />
+      <button
+        type="button"
+        onClick={openPicker}
+        className={buttonClassName}
+        aria-label="เลือกวันที่"
+      >
+        <Calendar size={16} />
+      </button>
+      <input
+        ref={pickerRef}
+        type="date"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="pointer-events-none absolute right-0 top-0 h-0 w-0 opacity-0"
+        tabIndex={-1}
+        aria-hidden="true"
+      />
+    </div>
+  );
 }
 
 function getTrainingExpiryDate(record?: Partial<TrainingRecord> | null): string {
@@ -841,6 +963,7 @@ export default function App() {
 
   // Crane register state — Firestore
   const { items: craneTrainees, loading: loadingCrane, saveItem: saveCraneFS, deleteItem: deleteCraneFS } = useFirestoreCollection<CraneTrainee>("craneTrainees", "id", "desc");
+  const [activeCraneTab, setActiveCraneTab] = useState<CraneRegisterTab>("trainee-register");
   const [craneView, setCraneView] = useState<"list" | "form">("list");
   const [editingCrane, setEditingCrane] = useState<CraneTrainee | null>(null);
 
@@ -1122,6 +1245,7 @@ export default function App() {
                   setReportView("list");
                   setProjectView("list");
                   setAuditView("list");
+                  setActiveCraneTab("trainee-register");
                   setCraneView("list");
                   setConfinedView("list");
                   setTrainingSignInView("list");
@@ -1268,25 +1392,70 @@ export default function App() {
 
           {/* ===== CRANE REGISTER SECTION ===== */}
           {activeSection === "crane-register" && (
-            <>
-              <CraneRegisterList
-                trainees={craneTrainees}
-                onAdd={() => { setEditingCrane(null); setCraneView("form"); }}
-                onEdit={(t: CraneTrainee) => { setEditingCrane(t); setCraneView("form"); }}
-                onDelete={handleDeleteCrane}
-                onImport={(rows: CraneTrainee[]) => rows.forEach((r) => saveCraneFS(r.id === 0 ? { ...r, id: Date.now() } : r))}
-              />
-              {craneView === "form" && (
-                <ModalShell onClose={() => { setCraneView("list"); setEditingCrane(null); }}>
-                  <CraneTraineeForm
-                    trainee={editingCrane}
-                    projectCodes={projectCodes}
-                    onCancel={() => { setCraneView("list"); setEditingCrane(null); }}
-                    onSave={handleSaveCrane}
+            <div className="space-y-5">
+              <div className="rounded-[24px] border border-slate-200 bg-white p-2 shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)]">
+                <div className="grid gap-2 md:grid-cols-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveCraneTab("trainee-register");
+                      setCraneView("list");
+                      setEditingCrane(null);
+                    }}
+                    className={`flex items-center justify-center gap-2 rounded-[18px] px-4 py-3 text-sm font-semibold transition ${
+                      activeCraneTab === "trainee-register"
+                        ? "bg-yellow-500 text-white shadow-sm"
+                        : "bg-slate-50 text-slate-600 hover:bg-slate-100"
+                    }`}
+                  >
+                    <HardHat size={18} />
+                    ทะเบียนรายชื่อผู้อบรมปั้นจั่น (Crane)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveCraneTab("daily-operation-report");
+                      setCraneView("list");
+                      setEditingCrane(null);
+                    }}
+                    className={`flex items-center justify-center gap-2 rounded-[18px] px-4 py-3 text-sm font-semibold transition ${
+                      activeCraneTab === "daily-operation-report"
+                        ? "bg-blue-600 text-white shadow-sm"
+                        : "bg-slate-50 text-slate-600 hover:bg-slate-100"
+                    }`}
+                  >
+                    <ClipboardList size={18} />
+                    รายงานการปฏิบัติงานประจำวัน
+                  </button>
+                </div>
+              </div>
+
+              {activeCraneTab === "trainee-register" && (
+                <>
+                  <CraneRegisterList
+                    trainees={craneTrainees}
+                    onAdd={() => { setEditingCrane(null); setCraneView("form"); }}
+                    onEdit={(t: CraneTrainee) => { setEditingCrane(t); setCraneView("form"); }}
+                    onDelete={handleDeleteCrane}
+                    onImport={(rows: CraneTrainee[]) => rows.forEach((r) => saveCraneFS(r.id === 0 ? { ...r, id: Date.now() } : r))}
                   />
-                </ModalShell>
+                  {craneView === "form" && (
+                    <ModalShell onClose={() => { setCraneView("list"); setEditingCrane(null); }}>
+                      <CraneTraineeForm
+                        trainee={editingCrane}
+                        projectCodes={projectCodes}
+                        onCancel={() => { setCraneView("list"); setEditingCrane(null); }}
+                        onSave={handleSaveCrane}
+                      />
+                    </ModalShell>
+                  )}
+                </>
               )}
-            </>
+
+              {activeCraneTab === "daily-operation-report" && (
+                <CraneDailyOperationReportList trainees={craneTrainees} />
+              )}
+            </div>
           )}
 
           {/* ===== TRAINING SIGN-IN SECTION ===== */}
@@ -1483,7 +1652,7 @@ function TrainingSignInList({
           <ClipboardCheck className="text-blue-600" size={22} />
           CMG — ใบลงชื่อเข้ารับการอบรม
         </h2>
-        <div className="text-sm text-slate-500">เธ—เธฑเนเธเธซเธกเธ” {records.length} เธฃเธฒเธขเธเธฒเธฃ {search && `(เธเธฃเธญเธเนเธฅเนเธง ${filtered.length} เธฃเธฒเธขเธเธฒเธฃ)`}</div>
+        <div className="text-sm text-slate-500">ทั้งหมด {records.length} รายการ {search && `(กรองแล้ว ${filtered.length} รายการ)`}</div>
       </div>
 
       <div className="bg-white border border-slate-200 rounded-[24px] p-4 sm:p-5 shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)] space-y-4">
@@ -1972,6 +2141,33 @@ const CRANE_TABLE_COLUMNS: { key: string; label: string; courseOption?: (typeof 
   { key: "expireDate", label: "Expire Date" },
 ];
 
+const CRANE_DAILY_REPORT_COLUMNS = [
+  { key: "employeeCode", label: "รหัสพนักงาน" },
+  { key: "fullName", label: "ชื่อ-สกุล" },
+  { key: "company", label: "ต้นสังกัด" },
+  { key: "position", label: "ตำแหน่ง" },
+  { key: "type", label: "ประเภทปั้นจั่น" },
+  { key: "project", label: "โครงการ" },
+  { key: "statusToday", label: "สถานะวันนี้" },
+];
+
+type AttendanceRecord = {
+  project?: string;
+  status?: string;
+};
+
+function getBangkokDateKey(date: Date = new Date()): string {
+  return new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Bangkok" }).format(date);
+}
+
+function extractAttendanceProjectCode(projectName: string): string {
+  const trimmed = projectName.trim();
+  if (!trimmed) return "";
+
+  const match = trimmed.match(/\bJ-\d{1,3}\b/i);
+  return match ? match[0].toUpperCase() : trimmed;
+}
+
 function CraneRegisterList({
   trainees,
   onAdd,
@@ -2212,6 +2408,128 @@ function CraneRegisterList({
   );
 }
 
+function CraneDailyOperationReportList({
+  trainees,
+}: {
+  trainees: CraneTrainee[];
+}) {
+  const [search, setSearch] = useState("");
+  const [attendanceMap, setAttendanceMap] = useState<Record<string, AttendanceRecord>>({});
+  const [loadingAttendance, setLoadingAttendance] = useState(true);
+  const attendanceDateKey = useMemo(() => getBangkokDateKey(), []);
+
+  useEffect(() => {
+    if (!masterDb) {
+      setAttendanceMap({});
+      setLoadingAttendance(false);
+      return;
+    }
+
+    setLoadingAttendance(true);
+    const attendanceRef = doc(masterDb, `CMG-HR-Database/root/attendance/${attendanceDateKey}`);
+
+    const unsubscribe = onSnapshot(
+      attendanceRef,
+      (attendanceSnapshot) => {
+        const rawRecords = (attendanceSnapshot.data()?.records ?? {}) as Record<string, AttendanceRecord>;
+        setAttendanceMap(rawRecords);
+        setLoadingAttendance(false);
+      },
+      (error) => {
+        console.error("[Attendance] subscribe failed:", error);
+        setAttendanceMap({});
+        setLoadingAttendance(false);
+      }
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [attendanceDateKey]);
+
+  const filtered = trainees.filter(
+    (t) =>
+      t.fullName.toLowerCase().includes(search.toLowerCase()) ||
+      t.project.toLowerCase().includes(search.toLowerCase()) ||
+      t.company.toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div>
+      <div className="bg-white border border-slate-200 rounded-[24px] p-4 sm:p-5 shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)]">
+        <div className="relative">
+          <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            placeholder="ค้นหาชื่อ, โครงการ, บริษัท..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+          />
+        </div>
+      </div>
+
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-400">
+        <span>ทั้งหมด {trainees.length} รายการ {search && `(กรองแล้ว ${filtered.length} รายการ)`}</span>
+        <span>เช็คข้อมูลวันที่ {attendanceDateKey}{loadingAttendance ? " (กำลังโหลด)" : ""}</span>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="text-center py-16 text-gray-400">ไม่พบรายการ</div>
+      ) : (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-yellow-500 text-white text-xs">
+                <th className="px-3 py-2 text-left font-semibold">#</th>
+                {CRANE_DAILY_REPORT_COLUMNS.map((column) => (
+                  <th key={column.key} className="px-3 py-2 text-left font-semibold">
+                    {column.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((trainee, idx) => {
+                const employeeCode = trainee.employeeCode?.trim() ?? "";
+                const attendance = employeeCode ? attendanceMap[employeeCode] : undefined;
+                const isPresent = attendance?.status?.trim() === "มา" && Boolean(attendance?.project?.trim());
+                const projectCode = isPresent ? extractAttendanceProjectCode(attendance?.project || "") : "";
+                const statusLabel = loadingAttendance
+                  ? "กำลังโหลด"
+                  : isPresent
+                    ? `มา อยู่ที่โครงการ ${projectCode || attendance?.project?.trim() || "-"}`
+                    : "ไม่มา";
+                const statusClasses = loadingAttendance
+                  ? "border-slate-200 bg-slate-50 text-slate-500"
+                  : isPresent
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : "border-red-200 bg-red-50 text-red-700";
+
+                return (
+                  <tr key={trainee.id} className={idx % 2 === 0 ? "bg-yellow-50" : "bg-white"}>
+                    <td className="px-3 py-2 text-gray-500">{idx + 1}</td>
+                    <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{employeeCode || "-"}</td>
+                    <td className="px-3 py-2 text-gray-800 whitespace-nowrap font-medium">{trainee.fullName}</td>
+                    <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{trainee.company}</td>
+                    <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{trainee.position}</td>
+                    <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{trainee.type}</td>
+                    <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{trainee.project}</td>
+                    <td className="px-3 py-2 text-gray-600 whitespace-nowrap">
+                      <span className={`inline-flex min-w-[172px] items-center justify-center rounded-lg border px-3 py-1 text-xs font-semibold ${statusClasses}`}>
+                        {statusLabel}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
 function CraneTraineeDetailModal({
   trainee,
   onClose,
@@ -2526,13 +2844,13 @@ function CraneTrainingHistoryModal({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">วันที่อบรมล่าสุด</label>
-              <input
-                type="date"
+              <DateDisplayInput
                 value={form.date}
-                onChange={(e) => set("date", e.target.value)}
-                className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                onChange={(value) => set("date", value)}
+                inputClassName="w-full border border-gray-300 rounded-lg p-2 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                buttonClassName="absolute inset-y-0 right-0 flex items-center px-3 text-gray-500 hover:text-gray-700"
               />
-              <p className="mt-1 text-[11px] text-gray-400">mm/dd/yyyy</p>
+              <p className="mt-1 text-[11px] text-gray-400">DD/MM/YYYY</p>
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">สถาบันอบรม</label>
@@ -2726,7 +3044,7 @@ function CraneTraineeForm({
         onChange={(e) => set(field, e.target.value)}
         className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
       />
-      {field === "lastTrainDate" && <p className="mt-1 text-[11px] text-gray-400">mm/dd/yyyy</p>}
+      {field === "lastTrainDate" && <p className="mt-1 text-[11px] text-gray-400">DD/MM/YYYY</p>}
     </div>
   );
 
@@ -3807,13 +4125,13 @@ function ConfinedSpaceTrainingHistoryModal({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">วันที่อบรมล่าสุด</label>
-              <input
-                type="date"
+              <DateDisplayInput
                 value={form.date}
-                onChange={(e) => set("date", e.target.value)}
-                className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
+                onChange={(value) => set("date", value)}
+                inputClassName="w-full border border-gray-300 rounded-lg p-2 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
+                buttonClassName="absolute inset-y-0 right-0 flex items-center px-3 text-gray-500 hover:text-gray-700"
               />
-              <p className="mt-1 text-[11px] text-gray-400">mm/dd/yyyy</p>
+              <p className="mt-1 text-[11px] text-gray-400">DD/MM/YYYY</p>
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">สถาบันอบรม</label>
@@ -4018,7 +4336,7 @@ function ConfinedSpaceTraineeForm({
         onChange={(e) => set(field, e.target.value)}
         className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
       />
-      {field === "lastTrainDate" && <p className="mt-1 text-[11px] text-gray-400">mm/dd/yyyy</p>}
+      {field === "lastTrainDate" && <p className="mt-1 text-[11px] text-gray-400">DD/MM/YYYY</p>}
     </div>
   );
 
