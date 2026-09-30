@@ -6,8 +6,8 @@ import { seedToFirebase } from "./seedFirebase";
 import { collection, doc, getDocs, onSnapshot } from "firebase/firestore";
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { db, masterDb, storage } from "./firebase";
-import { findMasterEmployee } from "./masterDatabase";
-import type { MasterEmployeeRecord } from "./masterDatabase";
+import { findMasterEmployee, subscribeToActiveMasterEmployees } from "./masterDatabase";
+import type { MasterEmployeeIdentity, MasterEmployeeRecord } from "./masterDatabase";
 import { useAuth } from "./auth/AuthContext";
 import { APP_NAME } from "./auth/constants";
 import {
@@ -3333,7 +3333,7 @@ function CraneTraineeForm({
 // ============================================================
 
 const CONFINED_BASE_COLUMNS = [
-  "ชื่อ-สกุล", "ต้นสังกัด", "ตำแหน่ง", "ประเภท", "สถานะ", "โครงการ", "หลักสูตร",
+  "รหัสพนักงาน", "ชื่อ-สกุล", "ต้นสังกัด", "ตำแหน่ง", "ประเภท", "สถานะ", "โครงการ", "หลักสูตร",
   "วันที่อบรมล่าสุด", "สถาบันอบรม", "CER.",
 ];
 
@@ -3527,6 +3527,7 @@ function getConfinedTrainingHistory(trainee?: Partial<ConfinedSpaceTrainee> | nu
 function confinedToRow(t: ConfinedSpaceTrainee): Record<string, string> {
   const trainingHistory = getConfinedTrainingHistory(t);
   const row: Record<string, string> = {
+    "รหัสพนักงาน": t.employeeCode || "",
     "ชื่อ-สกุล": t.fullName,
     "ต้นสังกัด": t.company,
     "ตำแหน่ง": t.position,
@@ -3613,6 +3614,7 @@ function rowToConfined(row: Record<string, string>, id: number): ConfinedSpaceTr
 
   return syncConfinedTrainingHistory({
     id,
+    employeeCode: row["รหัสพนักงาน"] || "",
     fullName: row["ชื่อ-สกุล"] || "",
     company: row["ต้นสังกัด"] || "",
     position: row["ตำแหน่ง"] || "",
@@ -3663,6 +3665,10 @@ function ConfinedSpaceRegisterList({
   onImport: (rows: ConfinedSpaceTrainee[]) => void;
 }) {
   const [search, setSearch] = useState("");
+  const [masterEmployees, setMasterEmployees] = useState<MasterEmployeeIdentity[]>([]);
+  const [loadingMasterEmployees, setLoadingMasterEmployees] = useState(true);
+  const [masterEmployeesError, setMasterEmployeesError] = useState("");
+  const [masterRefreshKey, setMasterRefreshKey] = useState(0);
   const fileRef = useRef<HTMLInputElement>(null);
   const [selectedTrainee, setSelectedTrainee] = useState<ConfinedSpaceTrainee | null>(null);
   const [visibleColumns, setVisibleColumns] = useState<Record<string, boolean>>(() =>
@@ -3670,6 +3676,86 @@ function ConfinedSpaceRegisterList({
   );
   const [columnPopupOpen, setColumnPopupOpen] = useState(false);
   const columnPopupRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingMasterEmployees(true);
+    setMasterEmployeesError("");
+
+    try {
+      const unsubscribe = subscribeToActiveMasterEmployees(
+        (employees) => {
+          if (!cancelled) {
+            setMasterEmployees(employees);
+            setLoadingMasterEmployees(false);
+          }
+        },
+        (error) => {
+          if (!cancelled) {
+            setMasterEmployees([]);
+            setMasterEmployeesError(
+              error instanceof Error ? error.message : "ไม่สามารถอ่านสถานะพนักงานจาก MasterDatabase ได้"
+            );
+            setLoadingMasterEmployees(false);
+          }
+        }
+      );
+
+      return () => {
+        cancelled = true;
+        unsubscribe();
+      };
+    } catch (error) {
+      if (!cancelled) {
+        setMasterEmployees([]);
+        setMasterEmployeesError(
+          error instanceof Error ? error.message : "ไม่สามารถอ่านสถานะพนักงานจาก MasterDatabase ได้"
+        );
+        setLoadingMasterEmployees(false);
+      }
+
+      return () => {
+        cancelled = true;
+      };
+    }
+  }, [masterRefreshKey]);
+
+  const activeEmployeeCodes = useMemo(
+    () => new Set(masterEmployees.map((employee) => employee.employeeCode.trim()).filter(Boolean)),
+    [masterEmployees]
+  );
+  const activeEmployeeNameCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    masterEmployees.forEach((employee) => {
+      const name = employee.fullName.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+      if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
+    });
+    return counts;
+  }, [masterEmployees]);
+  const workingTrainees = useMemo(() => {
+    if (loadingMasterEmployees || masterEmployeesError) return [];
+
+    return trainees.filter((trainee) => {
+      const employeeCode = String(trainee.employeeCode ?? "").trim();
+      if (employeeCode) return activeEmployeeCodes.has(employeeCode);
+
+      // Legacy/imported rows may not have employeeCode; only show an unambiguous exact-name match.
+      const fullName = (trainee.fullName ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+      return Boolean(fullName) && activeEmployeeNameCounts.get(fullName) === 1;
+    });
+  }, [
+    trainees,
+    loadingMasterEmployees,
+    masterEmployeesError,
+    activeEmployeeCodes,
+    activeEmployeeNameCounts,
+  ]);
+
+  useEffect(() => {
+    if (selectedTrainee && !workingTrainees.some((trainee) => trainee.id === selectedTrainee.id)) {
+      setSelectedTrainee(null);
+    }
+  }, [selectedTrainee, workingTrainees]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -3681,13 +3767,13 @@ function ConfinedSpaceRegisterList({
     }
   }, [columnPopupOpen]);
 
-  const filtered = trainees.filter(
+  const filtered = workingTrainees.filter(
     (t) =>
       t.fullName.toLowerCase().includes(search.toLowerCase()) ||
       t.project.toLowerCase().includes(search.toLowerCase()) ||
       t.company.toLowerCase().includes(search.toLowerCase())
   );
-  const maxHistoryCount = Math.max(1, ...trainees.map((t) => getConfinedTrainingHistory(t).length));
+  const maxHistoryCount = Math.max(1, ...workingTrainees.map((t) => getConfinedTrainingHistory(t).length));
 
   const handleExportTemplate = () => {
     const ws = XLSX.utils.aoa_to_sheet([getConfinedExportColumns(maxHistoryCount)]);
@@ -3697,7 +3783,7 @@ function ConfinedSpaceRegisterList({
   };
 
   const handleExport = () => {
-    const rows = trainees.map(confinedToRow);
+    const rows = workingTrainees.map(confinedToRow);
     const ws = XLSX.utils.json_to_sheet(rows, { header: getConfinedExportColumns(maxHistoryCount) });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "ทะเบียนที่อับอากาศ");
@@ -3784,9 +3870,31 @@ function ConfinedSpaceRegisterList({
         </div>
       </div>
 
-      <div className="text-xs text-gray-400 mb-2">ทั้งหมด {trainees.length} รายการ {search && `(กรองแล้ว ${filtered.length} รายการ)`}</div>
+      {loadingMasterEmployees ? (
+        <div role="status" className="mb-3 rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm text-teal-800">
+          กำลังอ่านสถานะพนักงานจาก MasterDatabase...
+        </div>
+      ) : masterEmployeesError ? (
+        <div role="alert" className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          <span>อ่าน MasterDatabase ไม่สำเร็จ จึงยังกรองรายชื่อไม่ได้: {masterEmployeesError}</span>
+          <button
+            type="button"
+            onClick={() => setMasterRefreshKey((key) => key + 1)}
+            className="rounded-md border border-red-300 bg-white px-3 py-1.5 font-medium hover:bg-red-100"
+          >
+            ลองอีกครั้ง
+          </button>
+        </div>
+      ) : (
+        <div className="text-xs text-gray-400 mb-2">
+          แสดง {workingTrainees.length} รายการที่ MasterDatabase มีสถานะ “ทำงาน” จากทะเบียนทั้งหมด {trainees.length} รายการ
+          {search && ` (กรองแล้ว ${filtered.length} รายการ)`}
+        </div>
+      )}
 
-      {filtered.length === 0 ? (
+      {loadingMasterEmployees ? (
+        <div className="text-center py-12 text-gray-400">กำลังโหลดทะเบียน...</div>
+      ) : masterEmployeesError ? null : filtered.length === 0 ? (
         <div className="text-center py-16 text-gray-400">ไม่พบรายการ</div>
       ) : (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-x-auto">

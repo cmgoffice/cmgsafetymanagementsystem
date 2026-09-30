@@ -4,6 +4,7 @@ import {
   getDoc,
   getDocs,
   limit,
+  onSnapshot,
   query,
   where,
 } from "firebase/firestore";
@@ -42,6 +43,15 @@ const EMPLOYEE_CODE_FIELDS = [
   "empCode",
   "code",
   "id",
+];
+
+const EMPLOYMENT_STATUS_FIELDS = [
+  "status",
+  "employmentStatus",
+  "workStatus",
+  "สถานะพนักงาน",
+  "สถานะกลุ่มงาน",
+  "profile.status",
 ];
 
 const MASTER_COLLECTION = MASTER_COLLECTION_PATH.join("/");
@@ -208,4 +218,60 @@ export async function findMasterEmployee(
   }
 
   return null;
+}
+
+export type MasterEmployeeIdentity = Pick<MasterEmployeeRecord, "employeeCode" | "fullName">;
+
+/** Subscribe to employees whose raw MasterDatabase employment status is exactly "ทำงาน". */
+export function subscribeToActiveMasterEmployees(
+  onEmployees: (employees: MasterEmployeeIdentity[]) => void,
+  onError: (error: Error) => void
+): () => void {
+  if (!masterDb) {
+    throw new Error("MasterDatabase is not configured.");
+  }
+  if (!MASTER_COLLECTION) {
+    throw new Error("MasterDatabase collection path is not configured.");
+  }
+
+  const employeeCollection = collection(masterDb, MASTER_COLLECTION);
+  const statusFields = Array.from(new Set(EMPLOYMENT_STATUS_FIELDS));
+  const documentsByStatusField = new Map<string, Map<string, DocumentData>>();
+  const initializedFields = new Set<string>();
+
+  const publishEmployees = () => {
+    if (initializedFields.size !== statusFields.length) return;
+
+    const matchingDocuments = new Map<string, DocumentData>();
+    documentsByStatusField.forEach((documents) => {
+      documents.forEach((data, documentId) => matchingDocuments.set(documentId, data));
+    });
+
+    onEmployees(
+      Array.from(matchingDocuments).flatMap(([documentId, data]) => {
+        if (pickText(data, EMPLOYMENT_STATUS_FIELDS) !== "ทำงาน") return [];
+        const employee = normalizeEmployee(data, documentId);
+        return [{ employeeCode: employee.employeeCode, fullName: employee.fullName }];
+      })
+    );
+  };
+
+  const unsubscribers = statusFields.map((field) =>
+    onSnapshot(
+      query(employeeCollection, where(field, "==", "ทำงาน")),
+      (snapshot) => {
+        documentsByStatusField.set(
+          field,
+          new Map<string, DocumentData>(
+            snapshot.docs.map((employeeDocument) => [employeeDocument.id, employeeDocument.data()] as const)
+          )
+        );
+        initializedFields.add(field);
+        publishEmployees();
+      },
+      onError
+    )
+  );
+
+  return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
 }
