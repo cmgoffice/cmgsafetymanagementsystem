@@ -6,7 +6,7 @@ import { seedToFirebase } from "./seedFirebase";
 import { collection, doc, getDocs, onSnapshot } from "firebase/firestore";
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { db, masterDb, storage } from "./firebase";
-import { findMasterEmployee, subscribeToActiveMasterEmployees } from "./masterDatabase";
+import { findMasterEmployee, subscribeToMasterEmployees } from "./masterDatabase";
 import type { MasterEmployeeIdentity, MasterEmployeeRecord } from "./masterDatabase";
 import { useAuth } from "./auth/AuthContext";
 import { APP_NAME } from "./auth/constants";
@@ -3459,7 +3459,7 @@ function getConfinedStatusDotClasses(status: string) {
     return "border-green-200 bg-green-500";
   }
 
-  if (status === "พ้นสภาพ" || status === "ลาออก") {
+  if (status === "พ้นสภาพ" || status === "ลาออก" || status === "ออก" || status === "เลิกจ้าง") {
     return "border-red-200 bg-red-500";
   }
 
@@ -3683,7 +3683,7 @@ function ConfinedSpaceRegisterList({
     setMasterEmployeesError("");
 
     try {
-      const unsubscribe = subscribeToActiveMasterEmployees(
+      const unsubscribe = subscribeToMasterEmployees(
         (employees) => {
           if (!cancelled) {
             setMasterEmployees(employees);
@@ -3720,42 +3720,78 @@ function ConfinedSpaceRegisterList({
     }
   }, [masterRefreshKey]);
 
-  const activeEmployeeCodes = useMemo(
-    () => new Set(masterEmployees.map((employee) => employee.employeeCode.trim()).filter(Boolean)),
+  const masterEmployeeByCode = useMemo(
+    () => new Map(
+      masterEmployees
+        .map((employee) => [employee.employeeCode.trim(), employee] as const)
+        .filter(([employeeCode]) => Boolean(employeeCode))
+    ),
     [masterEmployees]
   );
-  const activeEmployeeNameCounts = useMemo(() => {
-    const counts = new Map<string, number>();
+  const masterEmployeesByName = useMemo(() => {
+    const employeesByName = new Map<string, MasterEmployeeIdentity[]>();
     masterEmployees.forEach((employee) => {
       const name = employee.fullName.trim().replace(/\s+/g, " ").toLocaleLowerCase();
-      if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
+      if (!name) return;
+      employeesByName.set(name, [...(employeesByName.get(name) ?? []), employee]);
     });
-    return counts;
+    return employeesByName;
   }, [masterEmployees]);
-  const workingTrainees = useMemo(() => {
+  const matchedTraineeEntries = useMemo<Array<{
+    trainee: ConfinedSpaceTrainee;
+    employee: MasterEmployeeIdentity;
+    sourceIndex: number;
+  }>>(() => {
     if (loadingMasterEmployees || masterEmployeesError) return [];
 
-    return trainees.filter((trainee) => {
-      const employeeCode = String(trainee.employeeCode ?? "").trim();
-      if (employeeCode) return activeEmployeeCodes.has(employeeCode);
+    const matchedEntries: Array<{
+      trainee: ConfinedSpaceTrainee;
+      employee: MasterEmployeeIdentity;
+      sourceIndex: number;
+    }> = [];
 
-      // Legacy/imported rows may not have employeeCode; only show an unambiguous exact-name match.
-      const fullName = (trainee.fullName ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
-      return Boolean(fullName) && activeEmployeeNameCounts.get(fullName) === 1;
+    trainees.forEach((trainee, sourceIndex) => {
+      const employeeCode = String(trainee.employeeCode ?? "").trim();
+      let employee: MasterEmployeeIdentity | undefined;
+
+      if (employeeCode) {
+        employee = masterEmployeeByCode.get(employeeCode);
+      } else {
+        // Legacy/imported rows may not have employeeCode; only show an unambiguous exact-name match.
+        const fullName = (trainee.fullName ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+        const nameMatches = fullName ? masterEmployeesByName.get(fullName) ?? [] : [];
+        if (nameMatches.length === 1) employee = nameMatches[0];
+      }
+
+      if (employee) matchedEntries.push({ trainee, employee, sourceIndex });
+    });
+
+    return matchedEntries.sort((a, b) => {
+      const aPriority = a.employee.status === "ปฏิบัติงาน" ? 0 : 1;
+      const bPriority = b.employee.status === "ปฏิบัติงาน" ? 0 : 1;
+      return aPriority - bPriority || a.sourceIndex - b.sourceIndex;
     });
   }, [
     trainees,
     loadingMasterEmployees,
     masterEmployeesError,
-    activeEmployeeCodes,
-    activeEmployeeNameCounts,
+    masterEmployeeByCode,
+    masterEmployeesByName,
   ]);
+  const eligibleTrainees = useMemo(
+    () => matchedTraineeEntries.map(({ trainee }) => trainee),
+    [matchedTraineeEntries]
+  );
+  const masterEmployeeByTraineeId = useMemo(
+    () => new Map(matchedTraineeEntries.map(({ trainee, employee }) => [trainee.id, employee] as const)),
+    [matchedTraineeEntries]
+  );
 
   useEffect(() => {
-    if (selectedTrainee && !workingTrainees.some((trainee) => trainee.id === selectedTrainee.id)) {
+    if (selectedTrainee && !eligibleTrainees.some((trainee) => trainee.id === selectedTrainee.id)) {
       setSelectedTrainee(null);
     }
-  }, [selectedTrainee, workingTrainees]);
+  }, [selectedTrainee, eligibleTrainees]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -3767,13 +3803,26 @@ function ConfinedSpaceRegisterList({
     }
   }, [columnPopupOpen]);
 
-  const filtered = workingTrainees.filter(
-    (t) =>
-      t.fullName.toLowerCase().includes(search.toLowerCase()) ||
-      t.project.toLowerCase().includes(search.toLowerCase()) ||
-      t.company.toLowerCase().includes(search.toLowerCase())
-  );
-  const maxHistoryCount = Math.max(1, ...workingTrainees.map((t) => getConfinedTrainingHistory(t).length));
+  const filtered = eligibleTrainees.filter((t) => {
+    const searchTerm = search.toLowerCase();
+    const masterStatus = masterEmployeeByTraineeId.get(t.id)?.status ?? t.status;
+    return (
+      t.employeeCode?.toLowerCase().includes(searchTerm) ||
+      t.fullName.toLowerCase().includes(searchTerm) ||
+      t.project.toLowerCase().includes(searchTerm) ||
+      t.company.toLowerCase().includes(searchTerm) ||
+      masterStatus.toLowerCase().includes(searchTerm)
+    );
+  });
+  const maxHistoryCount = Math.max(1, ...eligibleTrainees.map((t) => getConfinedTrainingHistory(t).length));
+  const workingTraineeCount = matchedTraineeEntries.filter(({ employee }) => employee.status === "ปฏิบัติงาน").length;
+  const separatedTraineeCount = matchedTraineeEntries.length - workingTraineeCount;
+  const selectTrainee = (trainee: ConfinedSpaceTrainee) => {
+    setSelectedTrainee({
+      ...trainee,
+      status: masterEmployeeByTraineeId.get(trainee.id)?.status ?? trainee.status,
+    });
+  };
 
   const handleExportTemplate = () => {
     const ws = XLSX.utils.aoa_to_sheet([getConfinedExportColumns(maxHistoryCount)]);
@@ -3783,7 +3832,10 @@ function ConfinedSpaceRegisterList({
   };
 
   const handleExport = () => {
-    const rows = workingTrainees.map(confinedToRow);
+    const rows = eligibleTrainees.map((trainee) => confinedToRow({
+      ...trainee,
+      status: masterEmployeeByTraineeId.get(trainee.id)?.status ?? trainee.status,
+    }));
     const ws = XLSX.utils.json_to_sheet(rows, { header: getConfinedExportColumns(maxHistoryCount) });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "ทะเบียนที่อับอากาศ");
@@ -3887,7 +3939,8 @@ function ConfinedSpaceRegisterList({
         </div>
       ) : (
         <div className="text-xs text-gray-400 mb-2">
-          แสดง {workingTrainees.length} รายการที่ MasterDatabase มีสถานะ “ทำงาน” จากทะเบียนทั้งหมด {trainees.length} รายการ
+          แสดง {eligibleTrainees.length} รายการที่มีข้อมูลตรงกับ MasterDatabase จากทะเบียนทั้งหมด {trainees.length} รายการ
+          <span className="ml-2">(ทำงาน {workingTraineeCount} รายการ · ลาออก/ออก/เลิกจ้าง {separatedTraineeCount} รายการ)</span>
           {search && ` (กรองแล้ว ${filtered.length} รายการ)`}
         </div>
       )}
@@ -3920,11 +3973,11 @@ function ConfinedSpaceRegisterList({
                     <tr
                       key={t.id}
                       className={`${idx % 2 === 0 ? "bg-teal-50" : "bg-white"} cursor-pointer transition hover:bg-teal-100/80`}
-                      onClick={() => setSelectedTrainee(t)}
+                      onClick={() => selectTrainee(t)}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" || event.key === " ") {
                           event.preventDefault();
-                          setSelectedTrainee(t);
+                          selectTrainee(t);
                         }
                       }}
                       tabIndex={0}
@@ -3950,8 +4003,8 @@ function ConfinedSpaceRegisterList({
                           {!col.courseOption && col.key === "type" && t.type}
                           {!col.courseOption && col.key === "status" && (
                             <div className="flex items-center gap-2">
-                              <span className={`inline-flex h-3.5 w-3.5 rounded-full border ${getConfinedStatusDotClasses(t.status)}`} />
-                              <span>{t.status || "-"}</span>
+                              <span className={`inline-flex h-3.5 w-3.5 rounded-full border ${getConfinedStatusDotClasses(masterEmployeeByTraineeId.get(t.id)?.status ?? t.status)}`} />
+                              <span>{masterEmployeeByTraineeId.get(t.id)?.status || t.status || "-"}</span>
                             </div>
                           )}
                           {!col.courseOption && col.key === "project" && t.project}

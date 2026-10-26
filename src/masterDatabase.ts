@@ -54,6 +54,15 @@ const EMPLOYMENT_STATUS_FIELDS = [
   "profile.status",
 ];
 
+const MASTER_EMPLOYMENT_STATUSES = [
+  "ทำงาน",
+  "ปฏิบัติงาน",
+  "ลาออก",
+  "ออก",
+  "เลิกจ้าง",
+  "พ้นสภาพ",
+];
+
 const MASTER_COLLECTION = MASTER_COLLECTION_PATH.join("/");
 
 function readPath(data: DocumentData, path: string): unknown {
@@ -220,10 +229,10 @@ export async function findMasterEmployee(
   return null;
 }
 
-export type MasterEmployeeIdentity = Pick<MasterEmployeeRecord, "employeeCode" | "fullName">;
+export type MasterEmployeeIdentity = Pick<MasterEmployeeRecord, "employeeCode" | "fullName" | "status">;
 
-/** Subscribe to employees whose raw MasterDatabase employment status is exactly "ทำงาน". */
-export function subscribeToActiveMasterEmployees(
+/** Subscribe to employees with a current or separated employment status. */
+export function subscribeToMasterEmployees(
   onEmployees: (employees: MasterEmployeeIdentity[]) => void,
   onError: (error: Error) => void
 ): () => void {
@@ -249,16 +258,21 @@ export function subscribeToActiveMasterEmployees(
 
     onEmployees(
       Array.from(matchingDocuments).flatMap(([documentId, data]) => {
-        if (pickText(data, EMPLOYMENT_STATUS_FIELDS) !== "ทำงาน") return [];
+        const rawStatus = pickText(data, EMPLOYMENT_STATUS_FIELDS);
+        if (!MASTER_EMPLOYMENT_STATUSES.includes(rawStatus)) return [];
         const employee = normalizeEmployee(data, documentId);
-        return [{ employeeCode: employee.employeeCode, fullName: employee.fullName }];
+        return [{
+          employeeCode: employee.employeeCode,
+          fullName: employee.fullName,
+          status: employee.status,
+        }];
       })
     );
   };
 
   const unsubscribers = statusFields.map((field) =>
     onSnapshot(
-      query(employeeCollection, where(field, "==", "ทำงาน")),
+      query(employeeCollection, where(field, "in", MASTER_EMPLOYMENT_STATUSES)),
       (snapshot) => {
         documentsByStatusField.set(
           field,
