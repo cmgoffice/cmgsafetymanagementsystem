@@ -6,8 +6,8 @@ import { seedToFirebase } from "./seedFirebase";
 import { collection, doc, getDocs, onSnapshot } from "firebase/firestore";
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { db, masterDb, storage } from "./firebase";
-import { findMasterEmployee, subscribeToMasterEmployees } from "./masterDatabase";
-import type { MasterEmployeeIdentity, MasterEmployeeRecord } from "./masterDatabase";
+import { findMasterEmployee, findMasterEmployeesByNameKeyword, subscribeToMasterEmployees } from "./masterDatabase";
+import type { MasterEmployeeIdentity, MasterEmployeeLookupOption, MasterEmployeeRecord } from "./masterDatabase";
 import { useAuth } from "./auth/AuthContext";
 import { APP_NAME } from "./auth/constants";
 import {
@@ -4533,6 +4533,8 @@ function ConfinedSpaceTraineeForm({
 }) {
   const [form, setForm] = useState<ConfinedSpaceTrainee>(() => normalizeConfinedTrainee(trainee));
   const [employeeCode, setEmployeeCode] = useState(trainee?.employeeCode ?? "");
+  const [nameMatches, setNameMatches] = useState<MasterEmployeeLookupOption[]>([]);
+  const [nameMatchTotal, setNameMatchTotal] = useState(0);
   const [lookup, setLookup] = useState<LookupFeedback>({ loading: false, error: "", success: "" });
   const [historyModalState, setHistoryModalState] = useState<{ open: boolean; index: number | null }>({ open: false, index: null });
   const set = (field: keyof ConfinedSpaceTrainee, val: any) => setForm((prev) => ({ ...prev, [field]: val }));
@@ -4545,6 +4547,8 @@ function ConfinedSpaceTraineeForm({
 
   const handleEmployeeCodeChange = (value: string) => {
     setEmployeeCode(value);
+    setNameMatches([]);
+    setNameMatchTotal(0);
     setLookup({ loading: false, error: "", success: "" });
     setForm((prev) => ({
       ...prev,
@@ -4556,36 +4560,79 @@ function ConfinedSpaceTraineeForm({
     }));
   };
 
+  const handleEmployeeNameChange = (value: string) => {
+    setEmployeeCode("");
+    setNameMatches([]);
+    setNameMatchTotal(0);
+    setLookup({ loading: false, error: "", success: "" });
+    setForm((prev) => ({
+      ...prev,
+      employeeCode: "",
+      fullName: value,
+      company: "",
+      position: "",
+      status: "",
+    }));
+  };
+
   const handleLookup = async () => {
     const code = employeeCode.trim();
-    if (!code) {
-      setLookup({ loading: false, error: "กรุณากรอกรหัสพนักงาน", success: "" });
+    const fullName = form.fullName.trim();
+    if (!code && !fullName) {
+      setLookup({ loading: false, error: "กรุณากรอกรหัสพนักงานหรือชื่อ-สกุล", success: "" });
       return;
     }
 
     setLookup({ loading: true, error: "", success: "" });
+    setNameMatches([]);
+    setNameMatchTotal(0);
     try {
-      const employee = await findMasterEmployee(code);
+      let employee: Pick<MasterEmployeeRecord, "employeeCode" | "fullName" | "company" | "position" | "status"> | null;
+      if (code) {
+        employee = await findMasterEmployee(code);
+      } else {
+        const result = await findMasterEmployeesByNameKeyword(fullName);
+        if (result.totalCount > 1) {
+          setNameMatches(result.employees);
+          setNameMatchTotal(result.totalCount);
+          setLookup({
+            loading: false,
+            error: "",
+            success: `พบ ${result.totalCount} รายชื่อ กรุณาเลือกจากรายการ`,
+          });
+          return;
+        }
+        employee = result.employees[0] ?? null;
+      }
+
       if (!employee) {
-        setForm((prev) => ({ ...prev, employeeCode: code, fullName: "", company: "", position: "", status: "" }));
+        setForm((prev) => ({
+          ...prev,
+          employeeCode: "",
+          fullName: code ? "" : prev.fullName,
+          company: "",
+          position: "",
+          status: "",
+        }));
         setLookup({ loading: false, error: "ไม่พบข้อมูลพนักงานจาก MasterDatabase", success: "" });
         return;
       }
 
       if (!employee.fullName.trim()) {
-        setForm((prev) => ({ ...prev, employeeCode: code, fullName: "", company: employee.company || "", position: employee.position || "", status: employee.status || "" }));
+        setForm((prev) => ({ ...prev, employeeCode: "", company: employee.company || "", position: employee.position || "", status: employee.status || "" }));
         setLookup({ loading: false, error: "พบข้อมูลพนักงาน แต่ชื่อ-สกุลใน MasterDatabase ยังไม่ครบ", success: "" });
         return;
       }
 
       setForm((prev) => ({
         ...prev,
-        employeeCode: code,
+        employeeCode: employee.employeeCode,
         fullName: employee.fullName,
         company: employee.company || prev.company,
         position: employee.position || prev.position,
         status: employee.status,
       }));
+      setEmployeeCode(employee.employeeCode);
       setLookup({ loading: false, error: "", success: "พบข้อมูลพนักงานแล้ว" });
     } catch (error) {
       setLookup({
@@ -4594,6 +4641,24 @@ function ConfinedSpaceTraineeForm({
         success: "",
       });
     }
+  };
+
+  const handleNameMatchSelect = (documentId: string) => {
+    const employee = nameMatches.find((match) => match.documentId === documentId);
+    if (!employee) return;
+
+    setForm((prev) => ({
+      ...prev,
+      employeeCode: employee.employeeCode,
+      fullName: employee.fullName,
+      company: employee.company || prev.company,
+      position: employee.position || prev.position,
+      status: employee.status,
+    }));
+    setEmployeeCode(employee.employeeCode);
+    setNameMatches([]);
+    setNameMatchTotal(0);
+    setLookup({ loading: false, error: "", success: "พบข้อมูลพนักงานแล้ว" });
   };
 
   const toggleCourse = (course: (typeof CONFINED_COURSE_OPTIONS)[number]) => {
@@ -4636,12 +4701,13 @@ function ConfinedSpaceTraineeForm({
   };
 
   const handleSave = () => {
-    if (!employeeCode.trim() || !form.fullName.trim()) {
-      alert("กรุณากรอกรหัสพนักงานและกด Check ก่อนบันทึก");
+    const resolvedEmployeeCode = form.employeeCode?.trim() ?? "";
+    if (!resolvedEmployeeCode || !form.fullName.trim()) {
+      alert("กรุณากรอกรหัสพนักงานหรือชื่อ-สกุล และกด Check ก่อนบันทึก");
       return;
     }
 
-    onSave(syncConfinedTrainingHistory({ ...form, employeeCode: employeeCode.trim() }, trainingHistory));
+    onSave(syncConfinedTrainingHistory({ ...form, employeeCode: resolvedEmployeeCode }, trainingHistory));
   };
 
   const modalRecord =
@@ -4673,7 +4739,37 @@ function ConfinedSpaceTraineeForm({
               error={lookup.error}
               success={lookup.success}
             />
-            <ReadOnlyField label="ชื่อ-สกุล" value={form.fullName} />
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">ชื่อ-สกุล</label>
+              <input
+                type="text"
+                value={form.fullName}
+                onChange={(event) => handleEmployeeNameChange(event.target.value)}
+                className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
+                placeholder="พิมพ์ keyword ชื่อ-สกุลแล้วกด Check"
+              />
+              {nameMatches.length > 0 && (
+                <div className="mt-2">
+                  <select
+                    defaultValue=""
+                    onChange={(event) => handleNameMatchSelect(event.target.value)}
+                    className="w-full border border-teal-300 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
+                  >
+                    <option value="" disabled>-- เลือกชื่อ-สกุล --</option>
+                    {nameMatches.map((employee) => (
+                      <option key={employee.documentId} value={employee.documentId}>
+                        {employee.fullName} — {employee.employeeCode}{employee.company ? ` — ${employee.company}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {nameMatchTotal > nameMatches.length && (
+                    <p className="mt-1 text-[11px] text-gray-500">
+                      พบ {nameMatchTotal} รายชื่อ แสดง {nameMatches.length} รายการแรก กรุณาพิมพ์ keyword เพิ่มเพื่อจำกัดผล
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
             {txt("ต้นสังกัด (บริษัท)", "company")}
             {txt("ตำแหน่ง", "position")}
             {txt("ประเภท", "type")}

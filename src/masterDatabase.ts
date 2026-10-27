@@ -45,6 +45,35 @@ const EMPLOYEE_CODE_FIELDS = [
   "id",
 ];
 
+const EMPLOYEE_NAME_FIELDS = [
+  "fullName",
+  "name",
+  "employeeName",
+  "employeeFullName",
+  "nameTH",
+  "ชื่อ-สกุล",
+  "ชื่อ สกุล",
+  "ชื่อเต็ม",
+  "profile.fullName",
+];
+const EMPLOYEE_FIRST_NAME_FIELDS = [
+  "firstName",
+  "firstname",
+  "employeeFirstName",
+  "ชื่อตัว",
+  "ชื่อ",
+  "profile.firstName",
+];
+const EMPLOYEE_LAST_NAME_FIELDS = [
+  "lastName",
+  "lastname",
+  "employeeLastName",
+  "ชื่อสกุล",
+  "นามสกุล",
+  "สกุล",
+  "profile.lastName",
+];
+
 const EMPLOYMENT_STATUS_FIELDS = [
   "status",
   "employmentStatus",
@@ -99,17 +128,7 @@ function normalizeEmploymentStatus(status: string): string {
 }
 
 function buildFullName(data: DocumentData): string {
-  const directName = pickText(data, [
-    "fullName",
-    "name",
-    "employeeName",
-    "employeeFullName",
-    "nameTH",
-    "ชื่อ-สกุล",
-    "ชื่อ สกุล",
-    "ชื่อเต็ม",
-    "profile.fullName",
-  ]);
+  const directName = pickText(data, EMPLOYEE_NAME_FIELDS);
   if (directName) return directName;
 
   const title = pickText(data, [
@@ -118,23 +137,8 @@ function buildFullName(data: DocumentData): string {
     "ชื่อต้น",
     "คำนำหน้า",
   ]);
-  const firstName = pickText(data, [
-    "firstName",
-    "firstname",
-    "employeeFirstName",
-    "ชื่อตัว",
-    "ชื่อ",
-    "profile.firstName",
-  ]);
-  const lastName = pickText(data, [
-    "lastName",
-    "lastname",
-    "employeeLastName",
-    "ชื่อสกุล",
-    "นามสกุล",
-    "สกุล",
-    "profile.lastName",
-  ]);
+  const firstName = pickText(data, EMPLOYEE_FIRST_NAME_FIELDS);
+  const lastName = pickText(data, EMPLOYEE_LAST_NAME_FIELDS);
 
   return `${title}${firstName} ${lastName}`.trim();
 }
@@ -227,6 +231,50 @@ export async function findMasterEmployee(
   }
 
   return null;
+}
+
+export type MasterEmployeeLookupOption = Pick<
+  MasterEmployeeRecord,
+  "employeeCode" | "fullName" | "position" | "status" | "company"
+> & { documentId: string };
+
+const MAX_MASTER_NAME_SEARCH_RESULTS = 50;
+
+/** Search MasterDatabase employee names by a partial keyword. */
+export async function findMasterEmployeesByNameKeyword(
+  keyword: string
+): Promise<{ employees: MasterEmployeeLookupOption[]; totalCount: number }> {
+  const normalizedKeyword = keyword.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+  if (!normalizedKeyword) return { employees: [], totalCount: 0 };
+  if (!masterDb) {
+    throw new Error("MasterDatabase is not configured.");
+  }
+  if (!MASTER_COLLECTION) {
+    throw new Error("MasterDatabase collection path is not configured.");
+  }
+
+  const snapshot = await getDocs(collection(masterDb, MASTER_COLLECTION));
+  const matches = snapshot.docs.flatMap((employeeDocument) => {
+    const employee = normalizeEmployee(employeeDocument.data(), employeeDocument.id);
+    const normalizedFullName = employee.fullName.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+    if (!normalizedFullName.includes(normalizedKeyword)) return [];
+
+    return [{
+      documentId: employeeDocument.id,
+      employeeCode: employee.employeeCode,
+      fullName: employee.fullName,
+      position: employee.position,
+      status: employee.status,
+      company: employee.company,
+    }];
+  }).sort((a, b) =>
+    a.fullName.localeCompare(b.fullName) || a.employeeCode.localeCompare(b.employeeCode)
+  );
+
+  return {
+    employees: matches.slice(0, MAX_MASTER_NAME_SEARCH_RESULTS),
+    totalCount: matches.length,
+  };
 }
 
 export type MasterEmployeeIdentity = Pick<MasterEmployeeRecord, "employeeCode" | "fullName" | "status">;
